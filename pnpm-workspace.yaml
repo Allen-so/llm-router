@@ -1,7 +1,7 @@
 packages:
-  - apps/*
-  - packages/*
-  - infra/*
+  - "packages/*"
+  - "infra/*"
+
 
 onlyBuiltDependencies:
   - sharp
