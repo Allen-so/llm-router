@@ -1,4 +1,8 @@
 packages:
-  - "apps/*"
-  - "packages/*"
-  - "infra/*"
+  - apps/*
+  - packages/*
+  - infra/*
+
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver
