@@ -1,0 +1,10 @@
+{
+  "name": "ai-platform",
+  "private": true,
+  "packageManager": "pnpm@10",
+  "scripts": {
+    "dev": "pnpm -r dev",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format"
+  }
+}

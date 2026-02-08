@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# deps
+node_modules
+.pnpm-store
+
+# builds
+dist
+build
+.next
+out
+coverage
+
+# OS / editors
+.DS_Store
+.vscode
