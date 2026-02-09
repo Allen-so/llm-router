@@ -14,7 +14,7 @@ Endpoints
 
 Base: http://localhost:4000/v1
 
-Auth: Authorization: Bearer $LITELLM_MASTER_KEY
+Auth header: Authorization: Bearer $LITELLM_MASTER_KEY
 
 Model: deepseek-chat
 
