@@ -5,6 +5,8 @@ MODE ?= auto
 TEXT ?= Say ROUTER_OK
 ROUTER_DEBUG ?= 0
 HOURS ?= 24
+THREAD ?= default
+N ?= 30
 
 # thresholds (P3-2)
 THRESH_PREMIUM_ESCALATED_PER_HOUR ?= 3
@@ -73,3 +75,14 @@ stats:
 cleanlogs:
 	@rm -f logs/ask_last_run.log
 	@echo "OK: removed logs/ask_last_run.log"
+
+.PHONY: ask-thread thread-show thread-reset
+
+ask-thread:
+	ROUTER_DEBUG=$(ROUTER_DEBUG) ./scripts/ask.sh $(MODE) --thread $(THREAD) "$(TEXT)"
+
+thread-show:
+	./scripts/thread_show.sh $(THREAD) $(N)
+
+thread-reset:
+	./scripts/thread_reset.sh $(THREAD)
