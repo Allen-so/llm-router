@@ -36,5 +36,9 @@ echo "== OK: all checks passed =="
 
 echo
 echo "== route regress ==" 
+
+echo
+echo "== rules validate ==" 
+./scripts/rules_validate.py infra/router_rules.json
 ./scripts/route_regress.sh
 echo "== OK: check completed =="

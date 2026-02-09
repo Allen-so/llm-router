@@ -91,3 +91,7 @@ thread-reset:
 .PHONY: route-regress
 route-regress:
 	./scripts/route_regress.sh
+
+.PHONY: rules-validate
+rules-validate:
+	./scripts/rules_validate.py infra/router_rules.json
