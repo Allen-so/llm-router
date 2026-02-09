@@ -17,11 +17,11 @@ Modes:
   auto | daily | default | coding | long | hard | best-effort | premium
 Notes:
   - Default output: assistant content only (stdout).
-  - --meta prints a concise meta line (stderr).
+  - --meta prints: mode/model/rc/tokens/ms/escalated (stderr).
 Env:
   LITELLM_BASE_URL    default: http://127.0.0.1:4000/v1
   LITELLM_MASTER_KEY  required (auto-load from .env if missing)
-  ROUTER_DEBUG=1      debug logs to stderr
+  ROUTER_DEBUG=1      debug to stderr
 EOF
 }
 
@@ -29,7 +29,7 @@ strip_crlf() { tr -d '\r'; }
 ts_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_ms() { date +%s%3N; }
 
-# ---------- parse args ----------
+# ---------- args ----------
 META=0
 ARGS=()
 for a in "$@"; do
@@ -54,7 +54,7 @@ else
   TEXT="${TEXT_IN}"
 fi
 
-# ---------- env & auth ----------
+# ---------- env/auth ----------
 mkdir -p "${LOG_DIR}"
 
 LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://127.0.0.1:4000/v1}"
@@ -147,83 +147,83 @@ post_chat() {
     "${API_URL}"
 }
 
-# ---------- parse response (single JSON out) ----------
-# stdin: response json (string)
-# stdout: {"content":"...","tokens":"13"}  tokens may be ""
-parse_content_tokens_json() {
-  python3 - <<'PY'
+# ---------- file-based extractor (bypasses stdin/pipe weirdness) ----------
+extract_from_file() {
+  local file="$1"
+  local kind="$2"   # content | tokens
+  python3 - "$file" "$kind" <<'PY'
 import json, sys
-raw = sys.stdin.read().strip()
-out = {"content":"", "tokens":""}
+
+path = sys.argv[1]
+kind = sys.argv[2]
+
+try:
+  raw = open(path, "r", encoding="utf-8", errors="replace").read().strip()
+except Exception:
+  raw = ""
+
 if not raw:
-  print(json.dumps(out, ensure_ascii=False)); sys.exit(0)
+  sys.exit(0)
 
 try:
   obj = json.loads(raw)
 except Exception:
-  out["content"] = raw
-  print(json.dumps(out, ensure_ascii=False)); sys.exit(0)
+  if kind == "content":
+    sys.stdout.write(raw)
+  sys.exit(0)
 
-content = ""
-
-# chat.completions
-choices = obj.get("choices")
-if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-  ch = choices[0]
-  msg = ch.get("message")
-  if isinstance(msg, dict):
-    c = msg.get("content", "")
-    if isinstance(c, str):
-      content = c
-    elif isinstance(c, list):
-      parts = []
-      for p in c:
-        if isinstance(p, dict) and isinstance(p.get("text"), str):
-          parts.append(p["text"])
-        elif isinstance(p, str):
-          parts.append(p)
-      content = "".join(parts)
-  if not content and isinstance(ch.get("text"), str):
-    content = ch["text"]
-  if not content:
+def get_content(o):
+  # chat.completions
+  choices = o.get("choices")
+  if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+    ch = choices[0]
+    msg = ch.get("message")
+    if isinstance(msg, dict):
+      c = msg.get("content", "")
+      if isinstance(c, str):
+        return c
+      if isinstance(c, list):
+        parts = []
+        for p in c:
+          if isinstance(p, dict) and isinstance(p.get("text"), str):
+            parts.append(p["text"])
+          elif isinstance(p, str):
+            parts.append(p)
+        return "".join(parts)
+    t = ch.get("text")
+    if isinstance(t, str) and t:
+      return t
     delta = ch.get("delta")
     if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-      content = delta["content"]
+      return delta["content"]
 
-# fallback schemas
-if not content and isinstance(obj.get("output_text"), str):
-  content = obj["output_text"]
+  # fallbacks
+  ot = o.get("output_text")
+  if isinstance(ot, str) and ot:
+    return ot
 
-# sometimes error is still wrapped
-if not content:
-  err = obj.get("error")
+  err = o.get("error")
   if isinstance(err, dict) and isinstance(err.get("message"), str):
-    content = err["message"]
+    return err["message"]
 
-tok = ""
-u = obj.get("usage")
-if isinstance(u, dict):
-  tt = u.get("total_tokens")
-  if isinstance(tt, int):
-    tok = str(tt)
-  else:
+  return ""
+
+def get_tokens(o):
+  u = o.get("usage")
+  if isinstance(u, dict):
+    tt = u.get("total_tokens")
+    if isinstance(tt, int):
+      return str(tt)
     it = u.get("input_tokens")
     ot = u.get("output_tokens")
     if isinstance(it, int) and isinstance(ot, int):
-      tok = str(it + ot)
+      return str(it + ot)
+  return ""
 
-out["content"] = content or ""
-out["tokens"] = tok or ""
-print(json.dumps(out, ensure_ascii=False))
-PY
-}
-
-get_json_field() {
-  local key="$1"
-  python3 - <<PY
-import json, sys
-d = json.load(sys.stdin)
-sys.stdout.write(str(d.get("${key}", "")))
+if kind == "content":
+  sys.stdout.write(get_content(obj) or "")
+else:
+  sys.stdout.write(get_tokens(obj) or "")
 PY
 }
 
@@ -240,9 +240,11 @@ RC="$(printf "%s" "${OUT}" | sed -n 's/^__HTTP_CODE:\([0-9][0-9][0-9]\)$/\1/p' |
 RESP="$(printf "%s" "${OUT}" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d')"
 [[ -z "${RC}" ]] && RC=0
 
-PARSED_JSON="$(printf "%s" "${RESP}" | parse_content_tokens_json)"
-CONTENT="$(printf "%s" "${PARSED_JSON}" | get_json_field content)"
-TOKENS="$(printf "%s" "${PARSED_JSON}" | get_json_field tokens)"
+TMP="$(mktemp)"
+printf "%s" "${RESP}" > "${TMP}"
+CONTENT="$(extract_from_file "${TMP}" content || true)"
+TOKENS="$(extract_from_file "${TMP}" tokens || true)"
+rm -f "${TMP}"
 
 fail_or_empty() {
   [[ "${RC}" -ne 200 ]] && return 0
@@ -275,9 +277,11 @@ if fail_or_empty && [[ "${ALLOW_ESCALATION}" -eq 1 ]]; then
     RESP="$(printf "%s" "${OUT}" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d')"
     [[ -z "${RC}" ]] && RC=0
 
-    PARSED_JSON="$(printf "%s" "${RESP}" | parse_content_tokens_json)"
-    CONTENT="$(printf "%s" "${PARSED_JSON}" | get_json_field content)"
-    TOKENS="$(printf "%s" "${PARSED_JSON}" | get_json_field tokens)"
+    TMP="$(mktemp)"
+    printf "%s" "${RESP}" > "${TMP}"
+    CONTENT="$(extract_from_file "${TMP}" content || true)"
+    TOKENS="$(extract_from_file "${TMP}" tokens || true)"
+    rm -f "${TMP}"
   fi
 fi
 
