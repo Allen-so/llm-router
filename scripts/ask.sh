@@ -1,310 +1,314 @@
 #!/usr/bin/env bash
-# __ASK_P4_THREAD_V1__
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RULES="${ROUTER_RULES_PATH:-$ROOT/infra/router_rules.json}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="${ROOT_DIR}/logs"
+LOG_FILE_DEFAULT="${LOG_DIR}/ask_history.log"
 
-MODE="${1:-}"; shift || true
-if [[ -z "$MODE" ]]; then
-  echo "Usage: $0 <auto|daily|coding|long|hard|premium|best-effort> [--thread NAME] [--reset-thread] [--max-chars N] [--max-msgs N] \"prompt...\""
-  exit 2
-fi
+debug() { [[ "${ROUTER_DEBUG:-0}" == "1" ]] && echo "[debug] $*" >&2 || true; }
 
-# thread options
-THREAD=""
-RESET_THREAD=0
-THREAD_MAX_CHARS="${THREAD_MAX_CHARS:-8000}"
-THREAD_MAX_MSGS="${THREAD_MAX_MSGS:-24}"
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  ./scripts/ask.sh [--meta] <mode|auto> <text...>
+  echo "text" | ./scripts/ask.sh [--meta] <mode|auto> -
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --thread)
-      THREAD="${2:-}"; shift 2 || true
-      ;;
-    --reset-thread)
-      RESET_THREAD=1; shift || true
-      ;;
-    --max-chars)
-      THREAD_MAX_CHARS="${2:-8000}"; shift 2 || true
-      ;;
-    --max-msgs)
-      THREAD_MAX_MSGS="${2:-24}"; shift 2 || true
-      ;;
-    --)
-      shift; break
-      ;;
-    --*)
-      echo "Unknown option: $1" >&2
-      exit 2
-      ;;
-    *)
-      break
-      ;;
+Modes:
+  auto | daily | default | coding | long | hard | best-effort | premium
+Notes:
+  - Default output: assistant content only (stdout).
+  - --meta prints a concise meta line (stderr).
+Env:
+  LITELLM_BASE_URL    default: http://127.0.0.1:4000/v1
+  LITELLM_MASTER_KEY  required (auto-load from .env if missing)
+  ROUTER_DEBUG=1      debug logs to stderr
+EOF
+}
+
+strip_crlf() { tr -d '\r'; }
+ts_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+now_ms() { date +%s%3N; }
+
+# ---------- parse args ----------
+META=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --meta) META=1 ;;
+    --help|-h) usage; exit 0 ;;
+    *) ARGS+=("$a") ;;
   esac
 done
 
-PROMPT="${*:-}"
-if [[ -z "$PROMPT" ]]; then
-  echo "Usage: $0 <mode> [--thread NAME] \"prompt...\"" >&2
+if [[ "${#ARGS[@]}" -lt 2 ]]; then
+  usage
   exit 2
 fi
 
-mkdir -p "$ROOT/logs"
-DEBUG="${ROUTER_DEBUG:-0}"
-DEBUG_LOG="$ROOT/logs/ask_last_run.log"
-HIST_LOG="$ROOT/logs/ask_history.log"
+MODE_IN="${ARGS[0]}"
+TEXT_IN="${ARGS[@]:1}"
 
-# keep terminal output visible while logging when debug=1
-if [[ "$DEBUG" == "1" ]]; then
-  : > "$DEBUG_LOG"
-  exec > >(tee -a "$DEBUG_LOG") 2>&1
-  echo "[ask] debug=1 log=$DEBUG_LOG"
+if [[ "${TEXT_IN}" == "-" ]]; then
+  TEXT="$(cat)"
+else
+  TEXT="${TEXT_IN}"
 fi
 
-# load env
-set -a
-source "$ROOT/.env"
-set +a
+# ---------- env & auth ----------
+mkdir -p "${LOG_DIR}"
 
-# Base URL: env override + safe fallback + strip CR/LF/spaces
-BASE_URL="$(printf '%s' "${LITELLM_BASE_URL:-http://127.0.0.1:4000/v1}" | tr -d '\r\n' | sed 's/[[:space:]]\+$//')"
-if [[ "$BASE_URL" != http*://* ]]; then
-  BASE_URL="http://127.0.0.1:4000/v1"
+LITELLM_BASE_URL="${LITELLM_BASE_URL:-http://127.0.0.1:4000/v1}"
+LITELLM_BASE_URL="$(printf "%s" "${LITELLM_BASE_URL}" | strip_crlf)"
+API_URL="${LITELLM_BASE_URL%/}/chat/completions"
+
+if [[ -z "${LITELLM_MASTER_KEY:-}" && -f "${ROOT_DIR}/.env" ]]; then
+  LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "${ROOT_DIR}/.env" | head -n1 | cut -d= -f2- | strip_crlf || true)"
+fi
+if [[ -z "${LITELLM_MASTER_KEY:-}" ]]; then
+  echo "ERROR: LITELLM_MASTER_KEY is not set (.env or export)." >&2
+  exit 3
+fi
+AUTH_HEADER="Authorization: Bearer ${LITELLM_MASTER_KEY}"
+
+# ---------- routing ----------
+ESCALATION_CHAIN="${ESCALATION_CHAIN:-best-effort-chat->premium-chat}"
+
+map_mode_to_model() {
+  case "$1" in
+    auto) echo "" ;;
+    daily|default|default-chat|coding) echo "default-chat" ;;
+    long|long-chat) echo "long-chat" ;;
+    hard) echo "best-effort-chat" ;;
+    best-effort|best-effort-chat) echo "best-effort-chat" ;;
+    premium|premium-chat) echo "premium-chat" ;;
+    deepseek-chat|kimi-chat) echo "$1" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+MODE="${MODE_IN}"
+MODEL=""
+
+if [[ "${MODE_IN}" == "auto" ]]; then
+  ROUTE_OUT="$(python3 "${ROOT_DIR}/scripts/route.py" "${TEXT}" 2>/dev/null || true)"
+  debug "route.py => ${ROUTE_OUT}"
+
+  MODE="$(printf "%s" "${ROUTE_OUT}" | sed -n 's/.*mode=\([^ ]*\).*/\1/p')"
+  MODEL="$(printf "%s" "${ROUTE_OUT}" | sed -n 's/.*model=\([^ ]*\).*/\1/p')"
+  ESCALATION_CHAIN="$(printf "%s" "${ROUTE_OUT}" | sed -n 's/.*escalation=\([^ ]*\).*/\1/p')"
+
+  MODE="${MODE:-daily}"
+  MODEL="${MODEL:-default-chat}"
+  ESCALATION_CHAIN="${ESCALATION_CHAIN:-best-effort-chat->premium-chat}"
+else
+  MODEL="$(map_mode_to_model "${MODE_IN}")"
 fi
 
-AUTH_HEADER="Authorization: Bearer ${LITELLM_MASTER_KEY:?missing LITELLM_MASTER_KEY}"
+MODE="${MODE:-${MODE_IN}}"
+MODEL="${MODEL:-default-chat}"
+ESCALATION_CHAIN="${ESCALATION_CHAIN:-best-effort-chat->premium-chat}"
 
-ts_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-now_ms() { python3 -c "import time; print(int(time.time()*1000))"; }
+ALLOW_ESCALATION=0
+case "${MODE}" in
+  hard|best-effort|best-effort-chat) ALLOW_ESCALATION=1 ;;
+esac
 
-echo "[ask] base_url=$BASE_URL"
-echo "[ask] mode_in=$MODE"
-
-# route: route.py <rules_path> <mode> <msg>
-route_json="$(python3 "$ROOT/scripts/route.py" "$RULES" "$MODE" "$PROMPT")"
-route_mode="$(printf '%s' "$route_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("mode","unknown"))')"
-route_model="$(printf '%s' "$route_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("model","unknown"))')"
-route_prefix="$(printf '%s' "$route_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("prefix",""))')"
-
-echo "[ask] route_mode=$route_mode route_model=$route_model"
-
-# temp rule
-TEMP="${ROUTER_TEMPERATURE:-0.2}"
-if [[ "$route_model" == "kimi-chat" || "$route_model" == "long-chat" ]]; then
+TEMP="${TEMP:-0.2}"
+if [[ "${MODEL}" == "kimi-chat" || "${MODEL}" == "long-chat" ]]; then
   TEMP="1"
 fi
 
-# thread file (if enabled)
-THREAD_FILE=""
-if [[ -n "$THREAD" ]]; then
-  SAFE="$(printf '%s' "$THREAD" | tr -cs 'A-Za-z0-9._-' '_' )"
-  THREAD_FILE="$ROOT/logs/threads/${SAFE}.jsonl"
-  mkdir -p "$ROOT/logs/threads"
-  if [[ "$RESET_THREAD" == "1" ]]; then
-    : > "$THREAD_FILE"
-    echo "[ask] thread reset -> $THREAD_FILE"
-  fi
-fi
-
-# __THREAD_COMPACT_HOOK__
-if [[ -n "${THREAD_FILE:-}" && "${THREAD_AUTO_COMPACT:-1}" == "1" ]]; then
-  # compact only when thread gets big (summary + keep last turns)
-  # knobs: THREAD_COMPACT_MAX_CHARS, THREAD_COMPACT_KEEP_LAST, THREAD_SUMMARY_MODEL
-  THREAD_COMPACT_MAX_CHARS="${THREAD_COMPACT_MAX_CHARS:-12000}"
-  THREAD_COMPACT_KEEP_LAST="${THREAD_COMPACT_KEEP_LAST:-12}"
-  THREAD_SUMMARY_MODEL="${THREAD_SUMMARY_MODEL:-default-chat}"
-  ./scripts/thread_compact.sh "$THREAD" --max-chars "$THREAD_COMPACT_MAX_CHARS" --keep-last "$THREAD_COMPACT_KEEP_LAST" --model "$THREAD_SUMMARY_MODEL" >/dev/null 2>&1 || true
-fi
+debug "mode=${MODE} model=${MODEL} allow_escalation=${ALLOW_ESCALATION} temp=${TEMP}"
+debug "api_url=${API_URL}"
 
 build_payload() {
+  MODEL="$1" TEXT="$TEXT" TEMP="$TEMP" python3 - <<'PY'
+import json, os
+model = os.environ["MODEL"]
+text  = os.environ.get("TEXT","")
+temp  = float(os.environ.get("TEMP","0.2"))
+print(json.dumps({
+  "model": model,
+  "temperature": temp,
+  "messages": [{"role":"user","content": text}]
+}))
+PY
+}
+
+post_chat() {
   local model="$1"
-  local temp="$2"
-
-  if [[ -n "$THREAD_FILE" ]]; then
-    python3 "$ROOT/scripts/thread_build.py" \
-      --thread-file "$THREAD_FILE" \
-      --model "$model" \
-      --temperature "$temp" \
-      --prompt "$PROMPT" \
-      --prefix "$route_prefix" \
-      --max-chars "$THREAD_MAX_CHARS" \
-      --max-msgs "$THREAD_MAX_MSGS"
-  else
-    MODEL="$model" PROMPT="$PROMPT" PREFIX="$route_prefix" TEMP="$temp" python3 -c '
-import os, json
-model=os.environ["MODEL"]
-prompt=os.environ["PROMPT"]
-prefix=os.environ.get("PREFIX","")
-temp=float(os.environ.get("TEMP","0.2"))
-msgs=[]
-if prefix.strip():
-  msgs.append({"role":"system","content":prefix})
-msgs.append({"role":"user","content":prompt})
-print(json.dumps({"model":model,"messages":msgs,"temperature":temp}, ensure_ascii=False))
-'
-  fi
-}
-
-parse_content() {
-  python3 -c 'import json,sys
-raw=sys.stdin.read().strip()
-try: d=json.loads(raw) if raw else {}
-except: d={}
-c=d.get("choices") or []
-m=(c[0].get("message") if c else {}) or {}
-print((m.get("content") or "").strip())
-'
-}
-
-parse_tokens() {
-  python3 -c 'import json,sys
-raw=sys.stdin.read().strip()
-try: d=json.loads(raw) if raw else {}
-except: d={}
-u=d.get("usage") or {}
-print(u.get("total_tokens","-"))
-'
-}
-
-append_thread() {
-  local role="$1"
-  local content="$2"
-  local model="${3:-}"
-  local status="${4:-}"
-  local tokens="${5:-}"
-  local ms="${6:-}"
-  if [[ -z "$THREAD_FILE" ]]; then
-    return 0
-  fi
-  python3 "$ROOT/scripts/thread_append.py" \
-    --thread-file "$THREAD_FILE" \
-    --role "$role" \
-    --content "$content" \
-    --mode "$route_mode" \
-    --model "$model" \
-    --status "$status" \
-    --tokens "$tokens" \
-    --ms "$ms"
-}
-
-# write user turn first (so even failure keeps the question)
-append_thread "user" "$PROMPT" "$route_model" "sent" "-" "-"
-
-RC=0; RESP=""; CONTENT=""; TOKENS="-"; ATT_MS=0
-call_once() {
-  local model="$1"
-  local temp="$2"
   local payload
-  payload="$(build_payload "$model" "$temp")"
-  local t0 t1 rc resp
-  t0="$(now_ms)"
-
-  set +e
-  resp="$(curl -sS --max-time 120 --retry 0 \
-    "$BASE_URL/chat/completions" \
-    -H "$AUTH_HEADER" \
+  payload="$(build_payload "${model}")"
+  curl -sS \
+    -H "${AUTH_HEADER}" \
     -H "Content-Type: application/json" \
-    -d "$payload")"
-  rc=$?
-  set -e
-
-  t1="$(now_ms)"
-  ATT_MS="$((t1 - t0))"
-  RC="$rc"
-  RESP="$resp"
-  CONTENT="$(printf '%s' "$RESP" | parse_content 2>/dev/null || true)"
-  TOKENS="$(printf '%s' "$RESP" | parse_tokens 2>/dev/null || echo "-")"
+    -d "${payload}" \
+    -w "\n__HTTP_CODE:%{http_code}\n" \
+    "${API_URL}"
 }
 
-request_with_retry() {
-  local model="$1"
-  local temp="$2"
-  local max_try="${3:-2}"
-  local backoff=1
+# ---------- parse response (single JSON out) ----------
+# stdin: response json (string)
+# stdout: {"content":"...","tokens":"13"}  tokens may be ""
+parse_content_tokens_json() {
+  python3 - <<'PY'
+import json, sys
+raw = sys.stdin.read().strip()
+out = {"content":"", "tokens":""}
+if not raw:
+  print(json.dumps(out, ensure_ascii=False)); sys.exit(0)
 
-  for attempt in $(seq 1 "$max_try"); do
-    echo "[ask] try=$attempt/$max_try model=$model temp=$temp"
-    call_once "$model" "$temp"
-    if [[ "$RC" == "0" && -n "$CONTENT" ]]; then
-      return 0
-    fi
-    if [[ "$attempt" == "$max_try" ]]; then
-      return 1
-    fi
-    echo "[ask] retrying in ${backoff}s (rc=$RC empty=$([[ -z "$CONTENT" ]] && echo 1 || echo 0))"
-    sleep "$backoff"
-    backoff="$((backoff * 2))"
-  done
+try:
+  obj = json.loads(raw)
+except Exception:
+  out["content"] = raw
+  print(json.dumps(out, ensure_ascii=False)); sys.exit(0)
+
+content = ""
+
+# chat.completions
+choices = obj.get("choices")
+if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+  ch = choices[0]
+  msg = ch.get("message")
+  if isinstance(msg, dict):
+    c = msg.get("content", "")
+    if isinstance(c, str):
+      content = c
+    elif isinstance(c, list):
+      parts = []
+      for p in c:
+        if isinstance(p, dict) and isinstance(p.get("text"), str):
+          parts.append(p["text"])
+        elif isinstance(p, str):
+          parts.append(p)
+      content = "".join(parts)
+  if not content and isinstance(ch.get("text"), str):
+    content = ch["text"]
+  if not content:
+    delta = ch.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+      content = delta["content"]
+
+# fallback schemas
+if not content and isinstance(obj.get("output_text"), str):
+  content = obj["output_text"]
+
+# sometimes error is still wrapped
+if not content:
+  err = obj.get("error")
+  if isinstance(err, dict) and isinstance(err.get("message"), str):
+    content = err["message"]
+
+tok = ""
+u = obj.get("usage")
+if isinstance(u, dict):
+  tt = u.get("total_tokens")
+  if isinstance(tt, int):
+    tok = str(tt)
+  else:
+    it = u.get("input_tokens")
+    ot = u.get("output_tokens")
+    if isinstance(it, int) and isinstance(ot, int):
+      tok = str(it + ot)
+
+out["content"] = content or ""
+out["tokens"] = tok or ""
+print(json.dumps(out, ensure_ascii=False))
+PY
+}
+
+get_json_field() {
+  local key="$1"
+  python3 - <<PY
+import json, sys
+d = json.load(sys.stdin)
+sys.stdout.write(str(d.get("${key}", "")))
+PY
+}
+
+# ---------- call primary ----------
+ESCALATED=0
+MODEL_USED="${MODEL}"
+
+START_MS="$(now_ms)"
+OUT="$(post_chat "${MODEL}" || true)"
+END_MS="$(now_ms)"
+MS=$((END_MS-START_MS))
+
+RC="$(printf "%s" "${OUT}" | sed -n 's/^__HTTP_CODE:\([0-9][0-9][0-9]\)$/\1/p' | tail -n1)"
+RESP="$(printf "%s" "${OUT}" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d')"
+[[ -z "${RC}" ]] && RC=0
+
+PARSED_JSON="$(printf "%s" "${RESP}" | parse_content_tokens_json)"
+CONTENT="$(printf "%s" "${PARSED_JSON}" | get_json_field content)"
+TOKENS="$(printf "%s" "${PARSED_JSON}" | get_json_field tokens)"
+
+fail_or_empty() {
+  [[ "${RC}" -ne 200 ]] && return 0
+  [[ -z "${CONTENT}" ]] && return 0
   return 1
 }
 
-start_ms="$(now_ms)"
-final_model="$route_model"
-final_status="empty"
-
-# candidate sequence:
-candidates=("$route_model")
-if [[ "$route_mode" == "coding" ]]; then
-  if [[ "$route_model" != "best-effort-chat" && "$route_model" != "premium-chat" ]]; then
-    candidates+=("best-effort-chat")
-  fi
-elif [[ "$route_model" == "kimi-chat" || "$route_model" == "long-chat" ]]; then
-  candidates+=("default-chat" "best-effort-chat")
-fi
-
-# dedupe
-uniq=()
-seen=""
-for m in "${candidates[@]}"; do
-  if [[ " $seen " != *" $m "* ]]; then
-    uniq+=("$m")
-    seen+=" $m"
-  fi
-done
-candidates=("${uniq[@]}")
-
-for m in "${candidates[@]}"; do
-  temp="$TEMP"
-  if [[ "$m" == "kimi-chat" || "$m" == "long-chat" ]]; then
-    temp="1"
-  fi
-
-  if [[ "$m" == "best-effort-chat" ]]; then
-    chain=("best-effort-chat" "premium-chat")
-  else
-    chain=("$m")
-  fi
-
-  for cm in "${chain[@]}"; do
-    ct="$temp"
-    if [[ "$cm" == "kimi-chat" || "$cm" == "long-chat" ]]; then
-      ct="1"
-    fi
-
-    if request_with_retry "$cm" "$ct" 2; then
-      final_model="$cm"
-      final_status="ok"
-      break 2
-    else
-      final_model="$cm"
-      final_status="empty"
+# ---------- optional escalation ----------
+if fail_or_empty && [[ "${ALLOW_ESCALATION}" -eq 1 ]]; then
+  IFS='->' read -r -a chain <<<"${ESCALATION_CHAIN}"
+  next=""
+  for i in "${!chain[@]}"; do
+    if [[ "${chain[$i]}" == "${MODEL}" ]]; then
+      [[ $((i+1)) -lt "${#chain[@]}" ]] && next="${chain[$((i+1))]}"
+      break
     fi
   done
-done
 
-end_ms="$(now_ms)"
-total_ms="$((end_ms - start_ms))"
+  if [[ -n "${next}" ]]; then
+    debug "escalate: ${MODEL} -> ${next} (rc=${RC})"
+    ESCALATED=1
+    MODEL_USED="${next}"
 
-# history (cost_summary/cost_guard rely on this format)
-echo "$(ts_utc) mode=$route_mode model=$final_model status=$final_status rc=$RC tokens=$TOKENS ms=$total_ms" >> "$HIST_LOG"
-echo "[ask] done rc=$RC status=$final_status tokens=$TOKENS ms=$total_ms"
-echo "[ask] history -> $HIST_LOG"
+    START_MS="$(now_ms)"
+    OUT="$(post_chat "${next}" || true)"
+    END_MS="$(now_ms)"
+    MS=$((END_MS-START_MS))
 
-# append assistant turn (even if empty, store status for debugging threads)
-append_thread "assistant" "${CONTENT:-}" "$final_model" "$final_status" "$TOKENS" "$total_ms"
+    RC="$(printf "%s" "${OUT}" | sed -n 's/^__HTTP_CODE:\([0-9][0-9][0-9]\)$/\1/p' | tail -n1)"
+    RESP="$(printf "%s" "${OUT}" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d')"
+    [[ -z "${RC}" ]] && RC=0
 
-# print answer to terminal
-printf '%s\n' "${CONTENT:-}"
+    PARSED_JSON="$(printf "%s" "${RESP}" | parse_content_tokens_json)"
+    CONTENT="$(printf "%s" "${PARSED_JSON}" | get_json_field content)"
+    TOKENS="$(printf "%s" "${PARSED_JSON}" | get_json_field tokens)"
+  fi
+fi
 
-exit "$RC"
+STATUS="ok"
+if [[ "${RC}" -ne 200 || -z "${CONTENT}" ]]; then
+  STATUS="empty"
+fi
+
+if [[ "${STATUS}" != "ok" && "${RC}" -eq 200 && ( "${META}" -eq 1 || "${ROUTER_DEBUG:-0}" == "1" ) ]]; then
+  echo "[debug] rc=200 but content empty. raw response (first 800 chars):" >&2
+  printf "%s" "${RESP}" | head -c 800 >&2
+  echo >&2
+fi
+
+# ---------- logging ----------
+LOG_FILE="${ASK_LOG_FILE:-${LOG_FILE_DEFAULT}}"
+LOG_FILE="$(printf "%s" "${LOG_FILE}" | strip_crlf)"
+
+printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s\n" \
+  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" >> "${LOG_FILE}"
+
+# ---------- output ----------
+if [[ -n "${CONTENT}" ]]; then
+  printf "%s\n" "${CONTENT}"
+else
+  printf "ERROR: empty response (rc=%s)\n" "${RC}" >&2
+fi
+
+if [[ "${META}" -eq 1 ]]; then
+  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s\n" \
+    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" >&2
+fi
+
+[[ "${STATUS}" == "ok" ]] || exit 10
