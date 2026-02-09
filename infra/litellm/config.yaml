@@ -1,5 +1,19 @@
 model_list:
+  # --- DeepSeek (working) ---
   - model_name: deepseek-chat
     litellm_params:
       model: deepseek/deepseek-chat
       api_key: os.environ/DEEPSEEK_API_KEY
+
+  # --- Optional models (enable later) ---
+  # Uncomment ONLY after you add keys to .env and confirm provider/model names.
+
+  # - model_name: kimi-chat
+  #   litellm_params:
+  #     model: moonshot/<kimi-model-name>
+  #     api_key: os.environ/KIMI_API_KEY
+
+  # - model_name: gpt-4o-mini
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_key: os.environ/OPENAI_API_KEY
