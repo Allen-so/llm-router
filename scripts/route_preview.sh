@@ -4,14 +4,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RULES="${ROUTER_RULES_PATH:-$ROOT/infra/router_rules.json}"
 
+EXPLAIN=0
+if [[ "${1:-}" == "--explain" ]]; then
+  EXPLAIN=1
+  shift
+fi
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 \"text...\""
+  echo "Usage: $0 [--explain] \"text...\"" >&2
   exit 2
 fi
 
 TEXT="$*"
 
-# Keep stderr visible; capture stdout only (route.py prints JSON to stdout)
+# route.py expects: route.py <rules_path> <mode> <msg>
 ROUTE_JSON="$(python3 "$ROOT/scripts/route.py" "$RULES" auto "$TEXT")"
 
 if [[ -z "$ROUTE_JSON" ]]; then
@@ -25,19 +31,5 @@ if [[ "${ROUTER_DEBUG:-0}" == "1" ]]; then
   echo "----" >&2
 fi
 
-# IMPORTANT: use -c so stdin is free for JSON (no heredoc for code)
-printf '%s' "$ROUTE_JSON" | python3 -c '
-import json, sys
-raw = sys.stdin.read().strip()
-d = json.loads(raw) if raw else {}
-
-mode = d.get("mode") or "unknown"
-model = d.get("model") or "unknown"
-esc = d.get("escalation")
-if isinstance(esc, list) and esc:
-    chain = "->".join(str(x) for x in esc)
-else:
-    chain = "-"
-
-print(f"mode={mode} model={model} escalation={chain}")
-'
+# pass prompt via env to avoid quoting issues
+ROUTE_TEXT="$TEXT" printf "%s" "$ROUTE_JSON" | python3 "$ROOT/scripts/route_explain.py" "$RULES" "$EXPLAIN"
