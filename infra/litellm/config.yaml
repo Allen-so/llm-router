@@ -1,17 +1,17 @@
 model_list:
-  # --- Providers ---
+  # --- DeepSeek (working) ---
   - model_name: deepseek-chat
     litellm_params:
       model: deepseek/deepseek-chat
       api_key: os.environ/DEEPSEEK_API_KEY
 
-  # Kimi (Moonshot). Enable once MOONSHOT_API_KEY is set in .env
+  # --- Kimi / Moonshot (working) ---
   - model_name: kimi-chat
     litellm_params:
       model: moonshot/kimi-k2.5
       api_key: os.environ/MOONSHOT_API_KEY
 
-  # --- Logical aliases (clients use these names) ---
+  # --- Logical aliases (what clients should use) ---
   - model_name: default-chat
     litellm_params:
       model: deepseek/deepseek-chat
@@ -22,8 +22,14 @@ model_list:
       model: moonshot/kimi-k2.5
       api_key: os.environ/MOONSHOT_API_KEY
 
-  # Premium placeholder (wire later)
-  # - model_name: premium-chat
-  #   litellm_params:
-  #     model: anthropic/claude-opus-4.6
-  #     api_key: os.environ/OPUS_API_KEY
+  # --- Opus via OpenAI-compatible proxy (enable when you fill .env) ---
+  - model_name: opus-chat
+    litellm_params:
+      model: openai/os.environ/OPUS_MODEL_ID
+      api_base: os.environ/OPUS_API_BASE
+      api_key: os.environ/OPUS_API_KEY
+  - model_name: premium-chat
+    litellm_params:
+      model: anthropic/claude-3-opus-20240229
+      api_base: os.environ/ANTHROPIC_API_BASE
+      api_key: os.environ/ANTHROPIC_API_KEY
