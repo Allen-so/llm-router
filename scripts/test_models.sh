@@ -37,17 +37,30 @@ if [[ "${#MODELS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+pick_temp () {
+  local m="$1"
+  # Moonshot/Kimi: this provider may enforce temperature==1 for some models.
+  # Keep others deterministic by default.
+  case "$m" in
+    kimi-*|long-chat) echo "1" ;;
+    *) echo "0" ;;
+  esac
+}
+
 echo "Base: $BASE"
 echo "Testing: ${MODELS[*]}"
 echo
 
 for m in "${MODELS[@]}"; do
-  echo "==> $m"
-  payload='{"model":"'"$m"'","messages":[{"role":"user","content":"Reply with exactly: ROUTER_OK"}],"temperature":0}'
+  temp="$(pick_temp "$m")"
+  echo "==> $m (temperature=$temp)"
+
+  payload='{"model":"'"$m"'","messages":[{"role":"user","content":"Reply with exactly: ROUTER_OK"}],"temperature":'"$temp"'}'
   resp="$(curl -s -w "\n%{http_code}" "$BASE/chat/completions" \
     -H "Authorization: Bearer $KEY" \
     -H "Content-Type: application/json" \
     -d "$payload")"
+
   body="$(echo "$resp" | sed '$d')"
   http="$(echo "$resp" | tail -n 1)"
 
