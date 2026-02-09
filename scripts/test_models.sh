@@ -16,19 +16,21 @@ KEY="${LITELLM_MASTER_KEY:-local-dev-master-key}"
 echo "[1/3] fetch models..."
 models_json="$(curl -fsS "$BASE/models" -H "Authorization: Bearer $KEY")"
 
-# parse model ids with python3 (Ubuntu default)
-mapfile -t MODELS < <(python3 - <<'PY'
-import json,sys
-data=json.load(sys.stdin)
+# write to temp file to avoid stdin conflicts
+tmp="/tmp/litellm_models.json"
+printf '%s' "$models_json" > "$tmp"
+
+mapfile -t MODELS < <(python3 -c '
+import json
+data=json.load(open("'"$tmp"'","r",encoding="utf-8"))
 for item in data.get("data", []):
     mid=item.get("id")
     if mid:
         print(mid)
-PY
-<<<"$models_json")
+')
 
 if [[ "${#MODELS[@]}" -eq 0 ]]; then
-  echo "FAIL: no models returned"
+  echo "FAIL: no models parsed from /v1/models"
   echo "$models_json"
   exit 1
 fi
