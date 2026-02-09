@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "length_thresholds": {
+    "long_chars": 1200
+  },
+  "modes": {
+    "daily": {
+      "model": "default-chat"
+    },
+    "coding": {
+      "model": "default-chat",
+      "prefix": "You are a senior software engineer. Provide a minimal, correct solution with copy-paste-ready code. If assumptions are needed, state them briefly."
+    },
+    "long": {
+      "model": "long-chat",
+      "prefix": "You are a concise technical writer. Use clean structure and keep it practical."
+    },
+    "hard": {
+      "model": "best-effort-chat",
+      "prefix": "Use best-effort reasoning. If needed, escalate via the router. Provide a clear final answer."
+    },
+    "premium": {
+      "model": "premium-chat",
+      "prefix": "Use the strongest model. Provide the best answer you can."
+    }
+  },
+  "auto_rules": [
+    {
+      "mode": "long",
+      "when": {
+        "min_chars": 1200
+      }
+    },
+    {
+      "mode": "coding",
+      "when": {
+        "regex": [
+          "stack trace",
+          "traceback",
+          "exception",
+          "error",
+          "bug",
+          "debug",
+          "fix",
+          "docker",
+          "compose",
+          "python",
+          "bash",
+          "sql",
+          "api",
+          "http",
+          "curl"
+        ]
+      }
+    },
+    {
+      "mode": "hard",
+      "when": {
+        "regex": [
+          "prove",
+          "theorem",
+          "optimi[sz]e",
+          "derivation",
+          "linear programming",
+          "integer programming",
+          "var",
+          "cvar",
+          "risk",
+          "gurobi"
+        ]
+      }
+    },
+    {
+      "mode": "daily",
+      "when": {}
+    }
+  ],
+  "escalation": {
+    "chain": [
+      "best-effort-chat",
+      "premium-chat"
+    ]
+  },
+  "logging": {
+    "file": "logs/ask_history.log"
+  }
+}
