@@ -107,6 +107,16 @@ if [[ -n "$THREAD" ]]; then
   fi
 fi
 
+# __THREAD_COMPACT_HOOK__
+if [[ -n "${THREAD_FILE:-}" && "${THREAD_AUTO_COMPACT:-1}" == "1" ]]; then
+  # compact only when thread gets big (summary + keep last turns)
+  # knobs: THREAD_COMPACT_MAX_CHARS, THREAD_COMPACT_KEEP_LAST, THREAD_SUMMARY_MODEL
+  THREAD_COMPACT_MAX_CHARS="${THREAD_COMPACT_MAX_CHARS:-12000}"
+  THREAD_COMPACT_KEEP_LAST="${THREAD_COMPACT_KEEP_LAST:-12}"
+  THREAD_SUMMARY_MODEL="${THREAD_SUMMARY_MODEL:-default-chat}"
+  ./scripts/thread_compact.sh "$THREAD" --max-chars "$THREAD_COMPACT_MAX_CHARS" --keep-last "$THREAD_COMPACT_KEEP_LAST" --model "$THREAD_SUMMARY_MODEL" >/dev/null 2>&1 || true
+fi
+
 build_payload() {
   local model="$1"
   local temp="$2"
