@@ -1,81 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-# load .env if present
-if [[ -f .env ]]; then
+BASE="${BASE:-http://127.0.0.1:4000}"
+V1="${BASE%/}/v1"
+CHAT_URL="${V1}/chat/completions"
+
+if [[ -f ".env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source .env
   set +a
 fi
 
-BASE="http://127.0.0.1:4000/v1"
-KEY="${LITELLM_MASTER_KEY:-local-dev-master-key}"
+: "${LITELLM_MASTER_KEY:?Missing LITELLM_MASTER_KEY in .env}"
 
-models_json="$(curl -fsS "$BASE/models" -H "Authorization: Bearer $KEY")"
+AUTH_HEADER="Authorization: Bearer ${LITELLM_MASTER_KEY}"
+JSON_HEADER="Content-Type: application/json"
 
-tmp="/tmp/litellm_models.json"
-printf '%s' "$models_json" > "$tmp"
-
-if [[ "$#" -gt 0 ]]; then
-  MODELS=("$@")
-else
-  mapfile -t MODELS < <(python3 -c '
-import json
-data=json.load(open("'"$tmp"'","r",encoding="utf-8"))
-for item in data.get("data", []):
-    mid=item.get("id")
-    if mid:
-        print(mid)
-')
-fi
-
-if [[ "${#MODELS[@]}" -eq 0 ]]; then
-  echo "FAIL: no models to test"
-  echo "$models_json"
-  exit 1
-fi
-
-pick_temp () {
+temp_for() {
   local m="$1"
-  # Moonshot/Kimi: this provider may enforce temperature==1 for some models.
-  # Keep others deterministic by default.
-  case "$m" in
-    kimi-*|long-chat) echo "1" ;;
-    *) echo "0" ;;
-  esac
+  if [[ "$m" == kimi-* || "$m" == "long-chat" ]]; then
+    echo "1"
+  else
+    echo "0.2"
+  fi
 }
 
-echo "Base: $BASE"
-echo "Testing: ${MODELS[*]}"
+./scripts/wait_ready.sh
+
+if [[ "${1:-}" == "" ]]; then
+  echo "Usage: $0 <model1> [model2 ...]"
+  exit 2
+fi
+
+echo "Base: ${V1}"
+echo "Testing: $*"
 echo
 
-for m in "${MODELS[@]}"; do
-  temp="$(pick_temp "$m")"
-  echo "==> $m (temperature=$temp)"
-
-  payload='{"model":"'"$m"'","messages":[{"role":"user","content":"Reply with exactly: ROUTER_OK"}],"temperature":'"$temp"'}'
-  resp="$(curl -s -w "\n%{http_code}" "$BASE/chat/completions" \
-    -H "Authorization: Bearer $KEY" \
-    -H "Content-Type: application/json" \
-    -d "$payload")"
-
+failed=0
+for model in "$@"; do
+  temp="$(temp_for "$model")"
+  payload="$(cat <<JSON
+{
+  "model":"$model",
+  "temperature": $temp,
+  "messages":[{"role":"user","content":"ROUTER_OK"}]
+}
+JSON
+)"
+  resp="$(curl -sS -w '\n%{http_code}' -X POST "$CHAT_URL" \
+    -H "$JSON_HEADER" -H "$AUTH_HEADER" \
+    --data "$payload" || true)"
+  code="$(echo "$resp" | tail -n1)"
   body="$(echo "$resp" | sed '$d')"
-  http="$(echo "$resp" | tail -n 1)"
 
-  if [[ "$http" != "200" ]]; then
-    echo "FAIL http=$http"
+  echo "==> $model (temperature=$temp)"
+  if [[ "$code" != "200" ]]; then
+    echo "FAIL http=$code"
     echo "$body"
     echo
+    failed=1
     continue
   fi
-
-  if echo "$body" | grep -q "ROUTER_OK"; then
-    echo "PASS"
-  else
-    echo "FAIL (missing ROUTER_OK)"
+  if ! echo "$body" | grep -q "ROUTER_OK"; then
+    echo "FAIL (no ROUTER_OK in response)"
     echo "$body"
+    echo
+    failed=1
+    continue
   fi
+  echo "PASS"
   echo
 done
+
+exit "$failed"
