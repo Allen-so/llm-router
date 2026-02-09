@@ -1,17 +1,18 @@
-# secrets
 .env
+.env.*
+!.env.example
 
-# deps
-node_modules
-.pnpm-store
+node_modules/
+.pnpm-store/
+dist/
+build/
+.next/
+out/
 
-# builds
-dist
-build
-.next
-out
-coverage
+*.log
+coverage/
 
-# OS / editors
 .DS_Store
-.vscode
+Thumbs.db
+.vscode/
+.idea/

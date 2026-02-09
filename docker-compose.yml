@@ -1,12 +1,22 @@
 services:
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    image: docker.litellm.ai/berriai/litellm:main-latest
+    container_name: litellm
+    restart: unless-stopped
     ports:
       - "4000:4000"
-    environment:
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
+    env_file:
+      - .env
     volumes:
       - ./infra/litellm/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000", "--detailed_debug"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; s=socket.socket(); s.settimeout(1); r=s.connect_ex(('127.0.0.1',4000)); raise SystemExit(0 if r==0 else 1)\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s

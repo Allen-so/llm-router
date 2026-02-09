@@ -1,13 +1,5 @@
 model_list:
   - model_name: deepseek-chat
     litellm_params:
-      model: openai/deepseek-chat
-      api_base: https://api.deepseek.com/v1
+      model: deepseek/deepseek-chat
       api_key: os.environ/DEEPSEEK_API_KEY
-
-# Optional placeholder: enable later when you have key
-#  - model_name: kimi
-#    litellm_params:
-#      model: openai/kimi-k2
-#      api_base: https://api.moonshot.ai/v1
-#      api_key: os.environ/MOONSHOT_API_KEY
