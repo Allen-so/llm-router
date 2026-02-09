@@ -76,6 +76,7 @@ cleanlogs:
 	@rm -f logs/ask_last_run.log
 	@echo "OK: removed logs/ask_last_run.log"
 
+
 .PHONY: ask-thread thread-show thread-reset
 
 ask-thread:
