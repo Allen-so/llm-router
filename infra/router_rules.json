@@ -83,5 +83,76 @@
   },
   "logging": {
     "file": "logs/ask_history.log"
+  },
+  "rules": {
+    "coding": {
+      "keywords": [
+        "traceback",
+        "stack trace",
+        "exception",
+        "error",
+        "bug",
+        "debug",
+        "fix",
+        "keyerror",
+        "typeerror",
+        "valueerror",
+        "indexerror",
+        "attributeerror",
+        "importerror",
+        "modulenotfounderror",
+        "syntaxerror",
+        "nameerror",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "scikit",
+        "pip",
+        "venv",
+        "conda",
+        "segmentation fault",
+        "core dumped",
+        "permission denied",
+        "connection reset"
+      ]
+    },
+    "hard": {
+      "keywords": [
+        "optimize",
+        "optimization",
+        "linear programming",
+        "integer programming",
+        "milp",
+        "gurobi",
+        "simplex",
+        "lagrange",
+        "karush",
+        "kkt",
+        "convex",
+        "proof",
+        "derive",
+        "derivation",
+        "theorem",
+        "markowitz",
+        "var",
+        "cvar",
+        "expected shortfall",
+        "black scholes",
+        "gradient",
+        "hessian",
+        "bayes",
+        "maximum likelihood"
+      ]
+    }
+  },
+  "routing": {
+    "long_text_min_chars": 1200
+  },
+  "mode_to_model": {
+    "daily": "default-chat",
+    "coding": "default-chat",
+    "long": "long-chat",
+    "hard": "best-effort-chat",
+    "premium": "premium-chat"
   }
 }
