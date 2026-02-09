@@ -13,14 +13,15 @@ fi
 BASE="http://127.0.0.1:4000/v1"
 KEY="${LITELLM_MASTER_KEY:-local-dev-master-key}"
 
-echo "[1/3] fetch models..."
 models_json="$(curl -fsS "$BASE/models" -H "Authorization: Bearer $KEY")"
 
-# write to temp file to avoid stdin conflicts
 tmp="/tmp/litellm_models.json"
 printf '%s' "$models_json" > "$tmp"
 
-mapfile -t MODELS < <(python3 -c '
+if [[ "$#" -gt 0 ]]; then
+  MODELS=("$@")
+else
+  mapfile -t MODELS < <(python3 -c '
 import json
 data=json.load(open("'"$tmp"'","r",encoding="utf-8"))
 for item in data.get("data", []):
@@ -28,17 +29,18 @@ for item in data.get("data", []):
     if mid:
         print(mid)
 ')
+fi
 
 if [[ "${#MODELS[@]}" -eq 0 ]]; then
-  echo "FAIL: no models parsed from /v1/models"
+  echo "FAIL: no models to test"
   echo "$models_json"
   exit 1
 fi
 
-echo "Models: ${MODELS[*]}"
+echo "Base: $BASE"
+echo "Testing: ${MODELS[*]}"
 echo
 
-echo "[2/3] test each model via chat..."
 for m in "${MODELS[@]}"; do
   echo "==> $m"
   payload='{"model":"'"$m"'","messages":[{"role":"user","content":"Reply with exactly: ROUTER_OK"}],"temperature":0}'
@@ -46,7 +48,6 @@ for m in "${MODELS[@]}"; do
     -H "Authorization: Bearer $KEY" \
     -H "Content-Type: application/json" \
     -d "$payload")"
-
   body="$(echo "$resp" | sed '$d')"
   http="$(echo "$resp" | tail -n 1)"
 
@@ -65,5 +66,3 @@ for m in "${MODELS[@]}"; do
   fi
   echo
 done
-
-echo "[3/3] done."
