@@ -95,3 +95,7 @@ route-regress:
 .PHONY: rules-validate
 rules-validate:
 	./scripts/rules_validate.py infra/router_rules.json
+
+.PHONY: rules-validate-live
+rules-validate-live:
+	./scripts/rules_validate.py --live infra/router_rules.json
