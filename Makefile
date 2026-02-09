@@ -87,3 +87,7 @@ thread-show:
 
 thread-reset:
 	./scripts/thread_reset.sh $(THREAD)
+
+.PHONY: route-regress
+route-regress:
+	./scripts/route_regress.sh

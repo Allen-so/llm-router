@@ -33,3 +33,8 @@ echo "== route stats (last 24h) =="
 
 echo
 echo "== OK: all checks passed =="
+
+echo
+echo "== route regress ==" 
+./scripts/route_regress.sh
+echo "== OK: check completed =="
