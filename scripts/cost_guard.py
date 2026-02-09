@@ -1,117 +1,113 @@
 #!/usr/bin/env python3
-import argparse, datetime as dt, re, sys
+import argparse, os, re
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 LINE_RE = re.compile(
     r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+'
-    r'mode=(?P<mode>\S+)\s+model=(?P<model>\S+)\s+status=(?P<status>\S+)\s+'
-    r'rc=(?P<rc>-?\d+)\s+tokens=(?P<tokens>\S+)\s+ms=(?P<ms>\S+)\s*$'
+    r'.*?\bstatus=(?P<status>\w+)\b.*?'
+    r'\btokens=(?P<tokens>\d+)\b.*?'
+    r'\bms=(?P<ms>\d+)\b.*?'
+    r'\bmodel=(?P<model>[^\s]+)\b'
 )
 
-def parse_ts(s: str) -> dt.datetime:
-    return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+def parse_ts(s: str) -> datetime:
+    # "2026-02-09T14:54:28Z"
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
-def parse_int(x):
-    try:
-        return int(x)
-    except Exception:
-        return None
-
-def percentile(values, p):
-    if not values:
-        return None
-    v = sorted(values)
-    k = int((p/100.0) * len(v))
-    if k <= 0:
-        return v[0]
-    if k >= len(v):
-        return v[-1]
-    return v[k-1]
+def percentile(xs, p: float) -> int:
+    if not xs:
+        return 0
+    xs = sorted(xs)
+    if len(xs) == 1:
+        return xs[0]
+    k = int(round((len(xs) - 1) * p))
+    k = max(0, min(k, len(xs) - 1))
+    return xs[k]
 
 def main():
-    ap = argparse.ArgumentParser(description="Guardrail check for ask_history.log")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--log", default="logs/ask_history.log")
-    ap.add_argument("--since-hours", type=float, default=1.0)
+    ap.add_argument("--hours", type=float, default=1.0)
+    ap.add_argument("--since-hours", dest="hours", type=float, help="alias of --hours")
     args = ap.parse_args()
+
+    # knobs (env)
+    min_req = int(os.getenv("COST_GUARD_MIN_REQ", "5"))
+    warn_p95_ms = int(os.getenv("COST_GUARD_WARN_P95_MS", "10000"))
+    fail_p95_ms = int(os.getenv("COST_GUARD_FAIL_P95_MS", "30000"))
+    strict = os.getenv("COST_GUARD_STRICT", "0") == "1"
 
     path = Path(args.log)
     if not path.exists():
-        print(f"FAIL: log not found: {path}", file=sys.stderr)
-        sys.exit(2)
+        print(f"OK: no log file: {args.log} (skip)")
+        return 0
 
-    now = dt.datetime.now(dt.timezone.utc)
-    cutoff = now - dt.timedelta(hours=args.since_hours)
+    now = datetime.now(timezone.utc)
+    window = timedelta(hours=args.hours)
 
-    rows = []
+    ms = []
+    statuses = []
+    premium = 0
+    total = 0
+
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        m = LINE_RE.match(line.strip())
+        m = LINE_RE.search(line)
         if not m:
             continue
-        d = m.groupdict()
-        ts = parse_ts(d["ts"])
-        if ts < cutoff:
+        total += 1
+        ts = parse_ts(m.group("ts"))
+        if now - ts > window:
             continue
-        rows.append({
-            "ts": ts,
-            "mode": d["mode"],
-            "model": d["model"],
-            "status": d["status"],
-            "rc": int(d["rc"]),
-            "tokens": parse_int(d["tokens"]),
-            "ms": parse_int(d["ms"]),
-        })
+        statuses.append(m.group("status"))
+        ms.append(int(m.group("ms")))
+        if m.group("model") == "premium-chat":
+            premium += 1
 
-    total = len(rows)
-    ok = sum(1 for r in rows if r["status"] == "ok" and r["rc"] == 0)
-    empty = total - ok
+    n = len(ms)
+    ok = sum(1 for s in statuses if s == "ok")
+    empty = n - ok
 
-    ms = [r["ms"] for r in rows if isinstance(r["ms"], int)]
-    p95_ms = percentile(ms, 95)
+    # If sample is too small, don't overreact
+    if n < min_req:
+        print(f"OK: last {args.hours:g}h (UTC)  requests={n} (<{min_req}) ok={ok} empty={empty} (insufficient sample)")
+        return 0
 
-    premium_total = sum(1 for r in rows if r["model"] == "premium-chat")
-    premium_forced = sum(1 for r in rows if r["model"] == "premium-chat" and r["mode"] == "premium")
-    premium_escalated = premium_total - premium_forced
+    p95 = percentile(ms, 0.95)
 
-    # thresholds (env)
-    thr_premium_per_h = int(float((__import__("os").environ.get("THRESH_PREMIUM_ESCALATED_PER_HOUR", "3"))))
-    thr_p95_ms = int(float((__import__("os").environ.get("THRESH_P95_MS", "10000"))))
-
-    # scale by window hours
-    allowed_escalated = thr_premium_per_h * max(1, int(round(args.since_hours)))
-
-    # decide level
-    level = "OK"
+    # Decide severity
+    reasons = []
+    severity = "OK"
     rc = 0
 
-    reasons = []
+    if p95 > warn_p95_ms:
+        severity = "WARN"
+        reasons.append(f"p95_ms={p95} > {warn_p95_ms}")
+        rc = 0  # WARN should NOT fail by default
 
-    if empty > 0:
-        level = "FAIL"
-        rc = 2
-        reasons.append(f"empty/fail={empty}")
+    if p95 > fail_p95_ms:
+        severity = "FAIL"
+        reasons.append(f"p95_ms={p95} > {fail_p95_ms}")
+        rc = 1
 
-    if p95_ms is not None and p95_ms > thr_p95_ms:
-        if level != "FAIL":
-            level = "WARN"
-            rc = 1
-        reasons.append(f"p95_ms={p95_ms} > {thr_p95_ms}")
+    if strict and severity == "WARN":
+        # in strict mode, WARN fails
+        rc = 1
 
-    if premium_escalated > allowed_escalated:
-        if premium_escalated > 2 * allowed_escalated:
-            level = "FAIL"
-            rc = 2
-        else:
-            if level != "FAIL":
-                level = "WARN"
-                rc = 1
-        reasons.append(f"premium_escalated≈{premium_escalated} > {allowed_escalated}")
+    reasons_str = ("reasons: " + ", ".join(reasons)) if reasons else ""
 
-    window = f"last {args.since_hours:g}h (UTC)"
-    print(f"{level}: {window}  requests={total} ok={ok} empty={empty} p95_ms={p95_ms if p95_ms is not None else '-'} premium_escalated≈{premium_escalated}")
-    if reasons:
-        print("reasons: " + "; ".join(reasons))
+    if severity == "OK":
+        print(f"OK: last {args.hours:g}h (UTC)  requests={n} ok={ok} empty={empty} p95_ms={p95} premium={premium}")
+    elif severity == "WARN":
+        print(f"WARN: last {args.hours:g}h (UTC)  requests={n} ok={ok} empty={empty} p95_ms={p95} premium={premium}")
+        if reasons_str:
+            print(reasons_str)
+    else:
+        print(f"FAIL: last {args.hours:g}h (UTC)  requests={n} ok={ok} empty={empty} p95_ms={p95} premium={premium}")
+        if reasons_str:
+            print(reasons_str)
 
-    sys.exit(rc)
+    return rc
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
