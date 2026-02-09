@@ -32,4 +32,5 @@ if [[ "${ROUTER_DEBUG:-0}" == "1" ]]; then
 fi
 
 # pass prompt via env to avoid quoting issues
-ROUTE_TEXT="$TEXT" printf "%s" "$ROUTE_JSON" | python3 "$ROOT/scripts/route_explain.py" "$RULES" "$EXPLAIN"
+export ROUTE_TEXT="$TEXT"
+printf "%s" "$ROUTE_JSON" | python3 "$ROOT/scripts/route_explain.py" "$RULES" "$EXPLAIN"
