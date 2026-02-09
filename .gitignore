@@ -16,6 +16,7 @@ coverage/
 Thumbs.db
 .vscode/
 .idea/
-logs/
 backups/
 !logs/.gitkeep
+logs/*
+!logs/
