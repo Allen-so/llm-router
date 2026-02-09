@@ -1,6 +1,30 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: up down restart ps logs ping test chat config
+# ---- user knobs ----
+MODE ?= auto
+TEXT ?= Say ROUTER_OK
+ROUTER_DEBUG ?= 0
+HOURS ?= 24
+
+# thresholds (P3-2)
+THRESH_PREMIUM_ESCALATED_PER_HOUR ?= 3
+THRESH_P95_MS ?= 10000
+
+.PHONY: help up down restart ps ready test check ask cost24 guard1 stats cleanlogs
+
+help:
+	@echo "ai-platform commands:"
+	@echo "  make up                 - docker compose up -d"
+	@echo "  make down               - docker compose down"
+	@echo "  make ps                 - docker compose ps"
+	@echo "  make ready              - wait readiness"
+	@echo "  make test               - test_router.sh"
+	@echo "  make check              - up + ready + test + route preview + cost + guard"
+	@echo "  make ask MODE=auto TEXT='...' ROUTER_DEBUG=1"
+	@echo "  make cost24             - cost summary last 24h"
+	@echo "  make guard1             - cost guard last 1h (OK/WARN/FAIL)"
+	@echo "  make stats              - route stats last 24h"
+	@echo "  make cleanlogs           - remove ask_last_run.log only (optional)"
 
 up:
 	docker compose up -d
@@ -15,36 +39,37 @@ restart:
 ps:
 	docker compose ps
 
-logs:
-	docker compose logs -n 200 -f litellm
-
-ping:
+ready:
 	./scripts/wait_ready.sh
 
 test:
 	./scripts/test_router.sh
-	./scripts/test_models.sh deepseek-chat kimi-chat default-chat long-chat premium-chat best-effort-chat
 
-chat:
-	./scripts/chat.sh "$(MODEL)" "$(MSG)"
-
-config:
-	./scripts/print_client_config.sh
+check: up ready test
+	@echo
+	@echo "== route preview sample =="
+	@ROUTER_DEBUG=0 ./scripts/route_preview.sh "Traceback: KeyError in pandas"
+	@echo
+	@echo "== cost summary (last $(HOURS)h) =="
+	@./scripts/cost_summary.sh --since-hours $(HOURS)
+	@echo
+	@echo "== cost guard (last 1h) =="
+	@THRESH_PREMIUM_ESCALATED_PER_HOUR=$(THRESH_PREMIUM_ESCALATED_PER_HOUR) THRESH_P95_MS=$(THRESH_P95_MS) ./scripts/cost_guard.sh --since-hours 1
+	@echo
+	@echo "== OK: check completed =="
 
 ask:
-	./scripts/ask.sh "$(MODE)" "$(MSG)"
+	ROUTER_DEBUG=$(ROUTER_DEBUG) ./scripts/ask.sh $(MODE) "$(TEXT)"
 
-coding:
-	./scripts/ask.sh coding "$(MSG)"
+cost24:
+	./scripts/cost_summary.sh --since-hours 24
 
-long:
-	./scripts/ask.sh long "$(MSG)"
+guard1:
+	THRESH_PREMIUM_ESCALATED_PER_HOUR=$(THRESH_PREMIUM_ESCALATED_PER_HOUR) THRESH_P95_MS=$(THRESH_P95_MS) ./scripts/cost_guard.sh --since-hours 1
 
-hard:
-	./scripts/ask.sh hard "$(MSG)"
+stats:
+	./scripts/route_stats.sh --since-hours 24
 
-premium:
-	./scripts/ask.sh premium "$(MSG)"
-
-auto:
-	./scripts/ask.sh auto "$(MSG)"
+cleanlogs:
+	@rm -f logs/ask_last_run.log
+	@echo "OK: removed logs/ask_last_run.log"
