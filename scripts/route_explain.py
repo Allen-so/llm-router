@@ -25,6 +25,8 @@ def main():
         print(f"  input_len: {ex.get('input_len','-')}  long_min: {ex.get('long_min','-')}")
         print(f"  coding_hits: {ex.get('coding_hits',[])}")
         print(f"  hard_hits: {ex.get('hard_hits',[])}")
+        print(f"  coding_kw_count: {ex.get('coding_kw_count','-')}  sample: {ex.get('coding_kw_sample',[])}")
+        print(f"  hard_kw_count: {ex.get('hard_kw_count','-')}  sample: {ex.get('hard_kw_sample',[])}")
         print(f"  priority: {ex.get('priority',[])}")
         print(f"  reason: {ex.get('reason','-')}")
         print(f"  route_result: mode={mode} model={model}")
