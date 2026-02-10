@@ -99,3 +99,11 @@ rules-validate:
 .PHONY: rules-validate-live
 rules-validate-live:
 	./scripts/rules_validate.py --live infra/router_rules.json
+
+.PHONY: live-regress live-regress-full
+live-regress:
+	./scripts/live_regress.sh
+
+# includes premium-chat (costly)
+live-regress-full:
+	INCLUDE_PREMIUM=1 ./scripts/live_regress.sh

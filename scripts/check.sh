@@ -41,4 +41,14 @@ echo
 echo "== rules validate ==" 
 ./scripts/rules_validate.py --live infra/router_rules.json
 ./scripts/route_regress.sh
+
+echo
+if [[ "${LIVE_REGRESS:-0}" == "1" ]]; then
+  echo "== live regress =="
+  ./scripts/live_regress.sh
+else
+  echo "== live regress (skipped) =="
+  echo "Set LIVE_REGRESS=1 to run real /chat/completions smoke (costs tokens)."
+fi
+
 echo "== OK: check completed =="
