@@ -107,3 +107,17 @@ live-regress:
 # includes premium-chat (costly)
 live-regress-full:
 	INCLUDE_PREMIUM=1 ./scripts/live_regress.sh
+
+
+.PHONY: secrets-scan
+## Scan tracked files for secrets (WARN by default; STRICT=1 to fail)
+secrets-scan:
+	@STRICT=$${STRICT:-0} ./scripts/secrets_scan.sh
+
+
+.PHONY: doctor
+## Run environment + router health checks
+doctor:
+	@./scripts/doctor.sh
+# optional local includes
+-include Makefile.doctor.mk
