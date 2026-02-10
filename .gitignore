@@ -40,3 +40,9 @@ artifacts/run_*/
 # python caches
 __pycache__/
 *.pyc
+
+# --- runtime outputs (do not commit) ---
+apps/generated/
+artifacts/tmp/
+logs/qa_*.log
+logs/ask_history.log
