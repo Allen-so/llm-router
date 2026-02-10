@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib_http_retry.sh"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
@@ -265,12 +266,25 @@ post_chat() {
   local model="$1"
   local payload
   payload="$(build_payload "${model}")"
-  curl -sS \
-    -H "${AUTH_HEADER}" \
-    -H "Content-Type: application/json" \
-    -d "${payload}" \
-    -w "\n__HTTP_CODE:%{http_code}\n" \
-    "${API_URL}"
+  # --- P10/P11: robust POST with retry/backoff + diagnosis ---
+  local payload_file resp_file
+  payload_file="$(mktemp)"
+  resp_file="$(mktemp)"
+  printf '%s' "$payload" >"$payload_file"
+
+  # Always produce output with __HTTP_CODE line (do not crash the shell on failure)
+  if ! http_post_json_retry "$API_URL" "$payload_file" "$resp_file" \
+      -H "$AUTH_HEADER" \
+      -H "Content-Type: application/json"; then
+    echo "[ask][retry] ${ASK_DIAG}" >&2
+  fi
+
+  cat "$resp_file"
+  printf '\n__HTTP_CODE:%s\n' "${ASK_LAST_HTTP:-000}"
+printf '__ASK_RETRIES:%s\n' "${ASK_RETRIES:-0}"
+printf '__ASK_LAST_HTTP:%s\n' "${ASK_LAST_HTTP:-}"
+printf '__ASK_LAST_CURL_RC:%s\n' "${ASK_LAST_CURL_RC:-0}"
+  rm -f "$payload_file" "$resp_file" 2>/dev/null || true
 }
 
 # ---------- file-based extractor ----------
@@ -429,7 +443,13 @@ END_MS="$(now_ms)"
 MS=$((END_MS-START_MS))
 
 RC="$(printf "%s" "${OUT}" | sed -n 's/^__HTTP_CODE:\([0-9][0-9][0-9]\)$/\1/p' | tail -n1)"
-RESP="$(printf "%s" "${OUT}" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d')"
+ASK_RETRIES=$(printf %s "$OUT" | sed -n 's/^__ASK_RETRIES:\(.*\)$/\1/p' | tail -n1)
+ASK_LAST_HTTP=$(printf %s "$OUT" | sed -n 's/^__ASK_LAST_HTTP:\(.*\)$/\1/p' | tail -n1)
+ASK_LAST_CURL_RC=$(printf %s "$OUT" | sed -n 's/^__ASK_LAST_CURL_RC:\(.*\)$/\1/p' | tail -n1)
+ASK_RETRIES=${ASK_RETRIES:-0}
+ASK_LAST_HTTP=${ASK_LAST_HTTP:-$RC}
+ASK_LAST_CURL_RC=${ASK_LAST_CURL_RC:-0}
+RESP=$(printf %s "$OUT" | sed '/^__HTTP_CODE:[0-9][0-9][0-9]$/d' | sed '/^__ASK_/d')
 [[ -z "${RC}" ]] && RC=0
 
 TMP="$(mktemp)"
@@ -510,8 +530,10 @@ LOG_FILE="${ASK_LOG_FILE:-${LOG_FILE_DEFAULT}}"
 LOG_FILE="$(printf "%s" "${LOG_FILE}" | strip_crlf)"
 PROFILE_TAG="${PROFILE_NAME:-}"
 
-printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s format=%s\n" \
-  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" "${FORMAT_TAG}" >> "${LOG_FILE}"
+printf '%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s retries=%s last_http=%s last_curl_rc=%s escalated=%s profile=%s format=%s\n' \
+  "$(ts_utc)" "$MODE" "$MODEL_USED" "$STATUS" "$RC" "${TOKENS:-}" "$MS" \
+  "${ASK_RETRIES:-0}" "${ASK_LAST_HTTP:-$RC}" "${ASK_LAST_CURL_RC:-0}" \
+  "$ESCALATED" "$PROFILE_TAG" "$FORMAT_TAG" >> "$LOG_FILE"
 
 # ---------- output ----------
 if [[ -n "${CONTENT}" && "${STATUS}" != "empty" && "${STATUS}" != "json_invalid" ]]; then
@@ -528,8 +550,10 @@ else
 fi
 
 if [[ "${META}" -eq 1 ]]; then
-  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s format=%s\n" \
-    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" "${FORMAT_TAG}" >&2
+  printf 'meta: mode=%s model=%s rc=%s tokens=%s ms=%s retries=%s last_http=%s last_curl_rc=%s escalated=%s profile=%s format=%s\n' \
+    "$MODE" "$MODEL_USED" "$RC" "${TOKENS:-}" "$MS" \
+    "${ASK_RETRIES:-0}" "${ASK_LAST_HTTP:-$RC}" "${ASK_LAST_CURL_RC:-0}" \
+    "$ESCALATED" "$PROFILE_TAG" "$FORMAT_TAG"
 fi
 
 [[ "${STATUS}" == "ok" ]] || exit 10
