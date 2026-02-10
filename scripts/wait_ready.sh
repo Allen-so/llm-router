@@ -1,50 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="${BASE:-http://127.0.0.1:4000}"
-READY_URL="${BASE%/}/health/readiness"
-MODELS_URL="${BASE%/}/health/readiness"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
-# load .env for LITELLM_MASTER_KEY
-if [[ -f ".env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
+BASE="${LITELLM_BASE_URL:-http://127.0.0.1:4000/v1}"
+BASE="${BASE%/}"
+URL="${BASE}/models"
 
-AUTH=()
-if [[ -n "${LITELLM_MASTER_KEY:-}" ]]; then
-  AUTH=(-H "Authorization: Bearer ${LITELLM_MASTER_KEY}")
-fi
+TIMEOUT_SECS="${WAIT_READY_TIMEOUT_SECS:-60}"
+INTERVAL_SECS="${WAIT_READY_INTERVAL_SECS:-1}"
 
-MAX_ATTEMPTS="${MAX_ATTEMPTS:-30}"
-SLEEP_SECS="${SLEEP_SECS:-1}"
+deadline=$(( $(date +%s) + TIMEOUT_SECS ))
 
-check_200() {
-  local url="$1"
-  local code
-  code="$(curl -fs -o /dev/null -w '%{http_code}' --max-time 2 "$url" "${AUTH[@]}" || echo 000)" 2>/dev/null
-  [[ "$code" == "200" ]]
-}
+echo "[wait_ready] url=$URL timeout=${TIMEOUT_SECS}s"
 
-for ((i=1; i<=MAX_ATTEMPTS; i++)); do
-  # Prefer readiness; if it returns 200 -> ready
-  if check_200 "$READY_URL"; then
-    echo "READY: $READY_URL"
-    exit 0
+while :; do
+  now=$(date +%s)
+  if (( now >= deadline )); then
+    echo "[wait_ready] timeout after ${TIMEOUT_SECS}s" >&2
+    echo "[wait_ready] docker compose ps:" >&2
+    docker compose ps >&2 || true
+    echo "[wait_ready] last logs (litellm):" >&2
+    docker compose logs --tail 120 litellm >&2 || true
+    exit 1
   fi
 
-  # Fallback: /health/readiness is the real “serving traffic” proof
-  if check_200 "$MODELS_URL"; then
-    echo "READY: $MODELS_URL"
-    exit 0
-  fi
+  http="$(curl -sS -o /dev/null --connect-timeout 2 --max-time 3 -w '%{http_code}' "$URL" 2>/dev/null || echo 000)"
 
-  echo "WAIT: not ready yet ($i/$MAX_ATTEMPTS)"
-  sleep "$SLEEP_SECS"
+  # 200=OK, 401/403=需要鉴权但服务已响应 => 也算 ready
+  case "$http" in
+    200|401|403)
+      echo "[wait_ready] ready (HTTP=$http)"
+      exit 0
+      ;;
+    *)
+      echo "[wait_ready] not ready yet (HTTP=$http) ..."
+      sleep "$INTERVAL_SECS"
+      ;;
+  esac
 done
-
-echo "ERROR: Router not ready after $MAX_ATTEMPTS attempts."
-echo "Hint: docker compose logs -n 200 litellm"
-exit 1
