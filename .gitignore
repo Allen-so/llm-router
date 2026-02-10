@@ -32,3 +32,11 @@ artifacts/last_*.json
 artifacts/doctor_patch*.json
 infra/profiles/patch.txt
 backups/dev_scratch/
+
+# router-demo artifacts (local replay, do not commit)
+artifacts/runs/
+artifacts/run_*/
+
+# python caches
+__pycache__/
+*.pyc

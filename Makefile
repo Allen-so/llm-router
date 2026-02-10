@@ -1,123 +1,57 @@
-SHELL := /usr/bin/env bash
+SHELL := /bin/bash
 
-# ---- user knobs ----
 MODE ?= auto
 TEXT ?= Say ROUTER_OK
-ROUTER_DEBUG ?= 0
-HOURS ?= 24
-THREAD ?= default
-N ?= 30
+API_BASE ?= http://127.0.0.1:4000
 
-# thresholds (P3-2)
-THRESH_PREMIUM_ESCALATED_PER_HOUR ?= 3
-THRESH_P95_MS ?= 10000
-
-.PHONY: help up down restart ps ready test check ask cost24 guard1 stats cleanlogs
+.PHONY: help up ready upready down ps logs check ask doctor demo replay_latest
 
 help:
-	@echo "ai-platform commands:"
-	@echo "  make up                 - docker compose up -d"
-	@echo "  make down               - docker compose down"
-	@echo "  make ps                 - docker compose ps"
-	@echo "  make ready              - wait readiness"
-	@echo "  make test               - test_router.sh"
-	@echo "  make check              - up + ready + test + route preview + cost + guard"
-	@echo "  make ask MODE=auto TEXT='...' ROUTER_DEBUG=1"
-	@echo "  make cost24             - cost summary last 24h"
-	@echo "  make guard1             - cost guard last 1h (OK/WARN/FAIL)"
-	@echo "  make stats              - route stats last 24h"
-	@echo "  make cleanlogs           - remove ask_last_run.log only (optional)"
+	@echo "Targets:"
+	@echo "  make up                  - docker compose up -d"
+	@echo "  make ready               - wait until router is ready"
+	@echo "  make upready             - up + ready"
+	@echo "  make check               - ps + curl models + one ask"
+	@echo "  make ask MODE=auto TEXT='...'"
+	@echo "  make demo MODE=auto TEXT='...'"
+	@echo "  make replay_latest       - replay last demo run"
+	@echo "  make doctor              - run scripts/doctor.sh"
+	@echo "  make logs                - tail litellm logs"
+	@echo "  make down                - docker compose down"
 
 up:
 	docker compose up -d
 
+ready:
+	./scripts/wait_ready.sh
+
+upready: up ready
+
 down:
 	docker compose down
-
-restart:
-	docker compose down
-	docker compose up -d
 
 ps:
 	docker compose ps
 
-ready:
-	./scripts/wait_ready.sh
+logs:
+	docker compose logs --tail 120 litellm
 
-test:
-	./scripts/test_router.sh
-
-check: up ready test
-	@echo
-	@echo "== route preview sample =="
-	@ROUTER_DEBUG=0 ./scripts/route_preview.sh "Traceback: KeyError in pandas"
-	@echo
-	@echo "== cost summary (last $(HOURS)h) =="
-	@./scripts/cost_summary.sh --since-hours $(HOURS)
-	@echo
-	@echo "== cost guard (last 1h) =="
-	@THRESH_PREMIUM_ESCALATED_PER_HOUR=$(THRESH_PREMIUM_ESCALATED_PER_HOUR) THRESH_P95_MS=$(THRESH_P95_MS) ./scripts/cost_guard.sh --since-hours 1
-	@echo
-	@echo "== OK: check completed =="
+check: ps ready
+	@echo "[check] curl /v1/models =>"
+	@curl -sS -o /dev/null -w 'HTTP=%{http_code}\n' $(API_BASE)/v1/models || true
+	@echo "[check] ask.sh =>"
+	@./scripts/ask.sh --meta $(MODE) "$(TEXT)" || true
+	@echo "[check] last log =>"
+	@tail -n 1 logs/ask_history.log || true
 
 ask:
-	ROUTER_DEBUG=$(ROUTER_DEBUG) ./scripts/ask.sh $(MODE) "$(TEXT)"
+	./scripts/ask.sh --meta $(MODE) "$(TEXT)" || true
 
-cost24:
-	./scripts/cost_summary.sh --since-hours 24
-
-guard1:
-	THRESH_PREMIUM_ESCALATED_PER_HOUR=$(THRESH_PREMIUM_ESCALATED_PER_HOUR) THRESH_P95_MS=$(THRESH_P95_MS) ./scripts/cost_guard.sh --since-hours 1
-
-stats:
-	./scripts/route_stats.sh --since-hours 24
-
-cleanlogs:
-	@rm -f logs/ask_last_run.log
-	@echo "OK: removed logs/ask_last_run.log"
-
-
-.PHONY: ask-thread thread-show thread-reset
-
-ask-thread:
-	ROUTER_DEBUG=$(ROUTER_DEBUG) ./scripts/ask.sh $(MODE) --thread $(THREAD) "$(TEXT)"
-
-thread-show:
-	./scripts/thread_show.sh $(THREAD) $(N)
-
-thread-reset:
-	./scripts/thread_reset.sh $(THREAD)
-
-.PHONY: route-regress
-route-regress:
-	./scripts/route_regress.sh
-
-.PHONY: rules-validate
-rules-validate:
-	./scripts/rules_validate.py infra/router_rules.json
-
-.PHONY: rules-validate-live
-rules-validate-live:
-	./scripts/rules_validate.py --live infra/router_rules.json
-
-.PHONY: live-regress live-regress-full
-live-regress:
-	./scripts/live_regress.sh
-
-# includes premium-chat (costly)
-live-regress-full:
-	INCLUDE_PREMIUM=1 ./scripts/live_regress.sh
-
-
-.PHONY: secrets-scan
-## Scan tracked files for secrets (WARN by default; STRICT=1 to fail)
-secrets-scan:
-	@STRICT=$${STRICT:-0} ./scripts/secrets_scan.sh
-
-
-.PHONY: doctor
-## Run environment + router health checks
 doctor:
-	@./scripts/doctor.sh
-# optional local includes
--include Makefile.doctor.mk
+	./scripts/doctor.sh
+
+demo:
+	python3 apps/router-demo/run.py --mode "$(MODE)" --text "$(TEXT)" --api-base "$(API_BASE)"
+
+replay_latest:
+	python3 apps/router-demo/replay.py --run-dir "$$(cat artifacts/runs/LATEST)" --api-base "$(API_BASE)"

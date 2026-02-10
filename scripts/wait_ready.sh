@@ -27,6 +27,8 @@ while :; do
   fi
 
   http="$(curl -sS -o /dev/null --connect-timeout 2 --max-time 3 -w '%{http_code}' "$URL" 2>/dev/null || echo 000)"
+  http="${http:0:3}"
+  [[ -z "$http" ]] && http=000
 
   # 200=OK, 401/403=需要鉴权但服务已响应 => 也算 ready
   case "$http" in
