@@ -1,181 +1,206 @@
 #!/usr/bin/env python3
-import argparse, datetime as dt, re, sys
-from pathlib import Path
+import argparse
+import datetime as dt
+import math
+import os
+import sys
 from collections import defaultdict
 
-LINE_RE = re.compile(
-    r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+'
-    r'mode=(?P<mode>\S+)\s+model=(?P<model>\S+)\s+status=(?P<status>\S+)\s+'
-    r'rc=(?P<rc>-?\d+)\s+tokens=(?P<tokens>\S+)\s+ms=(?P<ms>\S+)\s*$'
-)
+def parse_line(line: str):
+    line = line.strip()
+    if not line:
+        return None
+    parts = line.split()
+    if len(parts) < 2:
+        return None
+    ts = parts[0]
+    kv = {}
+    for tok in parts[1:]:
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        kv[k] = v
+    kv["_ts"] = ts
+    return kv
 
-def parse_int(x):
+def parse_ts(ts: str):
+    # "2026-02-10T12:34:56Z"
     try:
-        return int(x)
+        return dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     except Exception:
         return None
 
-def percentile(values, p):
-    """Nearest-rank percentile, p in [0,100]."""
-    if not values:
+def pct(n, d):
+    return 0.0 if d == 0 else (100.0 * n / d)
+
+def quantile(vals, q):
+    if not vals:
         return None
-    v = sorted(values)
-    k = int((p/100.0) * len(v))
-    if k <= 0:
-        return v[0]
-    if k >= len(v):
-        return v[-1]
-    return v[k-1]  # nearest-rank
+    vals = sorted(vals)
+    if q <= 0:
+        return vals[0]
+    if q >= 1:
+        return vals[-1]
+    # nearest-rank
+    idx = int(math.ceil(q * len(vals))) - 1
+    idx = max(0, min(idx, len(vals) - 1))
+    return vals[idx]
 
-def fmt_ms(x):
-    if x is None:
-        return "-"
-    if x < 1000:
-        return f"{x}ms"
-    return f"{x/1000:.2f}s"
-
-def fmt_int(x):
-    return "-" if x is None else str(x)
-
-def utc_today():
-    return dt.datetime.now(dt.timezone.utc).date()
-
-def parse_ts(ts):
-    # ts is like 2026-02-09T14:59:58Z
-    return dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+def fmt_s(ms):
+    if ms is None:
+        return "n/a"
+    return f"{ms/1000:.2f}s"
 
 def main():
-    ap = argparse.ArgumentParser(description="Summarize ask_history.log usage/cost signals.")
-    ap.add_argument("--log", default="logs/ask_history.log", help="Path to ask_history.log")
-    ap.add_argument("--date", default=None, help="UTC date filter: YYYY-MM-DD (default: today UTC)")
-    ap.add_argument("--since-hours", type=float, default=None, help="Only include last N hours (UTC)")
-    ap.add_argument("--all", action="store_true", help="Include all lines (ignore date filter)")
-    ap.add_argument("--json", action="store_true", help="Output JSON (minimal fields)")
-    args = ap.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("log", nargs="?", default="logs/ask_history.log")
+    ap.add_argument("--hours", type=float, default=24.0)
+    ap.add_argument("--since-hours", dest="hours", type=float)  # alias
+    args, _unknown = ap.parse_known_args()
 
-    path = Path(args.log)
-    if not path.exists():
-        print(f"ERROR: log not found: {path}", file=sys.stderr)
-        sys.exit(1)
+    log_path = args.log
+    hours = float(args.hours)
 
-    raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(hours=hours)
+
+    if not os.path.exists(log_path):
+        print("== cost summary ==")
+        print(f"log: {log_path}")
+        print(f"window: last {hours:g}h (UTC)")
+        print("parsed: 0 / total_lines: 0  |  filtered: 0")
+        print()
+        print("requests: 0  ok: 0  empty/fail: 0")
+        print("tokens: total=0  avg=0")
+        print("latency: avg=n/a  p50=n/a  p95=n/a")
+        print("premium-chat: 0 (forced=0, escalated≈0)  |  best-effort-chat: 0")
+        return 0
+
+    total_lines = 0
+    parsed = 0
+    filtered = 0
 
     rows = []
-    for line in raw_lines:
-        m = LINE_RE.match(line.strip())
-        if not m:
-            continue
-        d = m.groupdict()
-        ts = parse_ts(d["ts"])
-        rows.append({
-            "ts": ts,
-            "mode": d["mode"],
-            "model": d["model"],
-            "status": d["status"],
-            "rc": int(d["rc"]),
-            "tokens": parse_int(d["tokens"]),
-            "ms": parse_int(d["ms"]),
-            "raw": line.strip()
-        })
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            total_lines += 1
+            kv = parse_line(line)
+            if not kv:
+                continue
+            ts = parse_ts(kv.get("_ts", ""))
+            if not ts:
+                continue
+            parsed += 1
+            if ts < start:
+                continue
+            filtered += 1
+            rows.append(kv)
 
-    if args.all:
-        filtered = rows
-        window = "ALL"
-    else:
-        if args.since_hours is not None:
-            cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=args.since_hours)
-            filtered = [r for r in rows if r["ts"] >= cutoff]
-            window = f"last {args.since_hours:g}h (UTC)"
+    # aggregates
+    req = len(rows)
+    ok = 0
+    empty = 0
+
+    tokens_list = []
+    ms_list = []
+
+    per_model = defaultdict(lambda: {"n":0,"ok":0,"tokens":0,"ms":[]} )
+
+    premium_n = 0
+    premium_forced = 0
+    premium_escal = 0
+
+    be_n = 0
+    be_forced = 0
+
+    for r in rows:
+        model = r.get("model", "")
+        mode  = r.get("mode", "")
+        status = r.get("status", "")
+        rc = r.get("rc", "")
+        escal = r.get("escalated", "0")
+
+        try:
+            rc_i = int(rc) if rc else 0
+        except Exception:
+            rc_i = 0
+
+        tok = 0
+        ms = None
+        try:
+            tok = int(r.get("tokens","") or 0)
+        except Exception:
+            tok = 0
+        try:
+            ms = int(r.get("ms","") or 0)
+        except Exception:
+            ms = None
+
+        is_ok = (rc_i == 200) and (status == "ok" or status == "" )
+        if rc_i == 200 and status == "empty":
+            is_ok = False
+
+        if is_ok and (r.get("status","") != "json_invalid"):
+            ok += 1
         else:
-            day = utc_today() if args.date is None else dt.date.fromisoformat(args.date)
-            filtered = [r for r in rows if r["ts"].date() == day]
-            window = f"{day.isoformat()} (UTC)"
+            # treat json_invalid as fail too
+            empty += 1
 
-    if args.json:
-        import json
-        out = {
-            "log": str(path),
-            "window": window,
-            "total_lines": len(raw_lines),
-            "parsed": len(rows),
-            "filtered": len(filtered),
-        }
-        # quick totals
-        out["ok"] = sum(1 for r in filtered if r["status"] == "ok" and r["rc"] == 0)
-        out["empty"] = sum(1 for r in filtered if r["status"] != "ok" or r["rc"] != 0)
-        toks = [r["tokens"] for r in filtered if isinstance(r["tokens"], int)]
-        ms = [r["ms"] for r in filtered if isinstance(r["ms"], int)]
-        out["tokens_total"] = sum(toks) if toks else 0
-        out["tokens_avg"] = (sum(toks)/len(toks)) if toks else None
-        out["ms_p50"] = percentile(ms, 50)
-        out["ms_p95"] = percentile(ms, 95)
-        print(json.dumps(out, ensure_ascii=False))
-        return
+        if tok > 0:
+            tokens_list.append(tok)
+        if ms is not None and ms > 0:
+            ms_list.append(ms)
 
-    # -------- pretty text output --------
-    total = len(filtered)
-    ok = sum(1 for r in filtered if r["status"] == "ok" and r["rc"] == 0)
-    empty = total - ok
+        pm = per_model[model]
+        pm["n"] += 1
+        pm["ok"] += 1 if is_ok else 0
+        pm["tokens"] += tok
+        if ms is not None and ms > 0:
+            pm["ms"].append(ms)
 
-    toks = [r["tokens"] for r in filtered if isinstance(r["tokens"], int)]
-    ms = [r["ms"] for r in filtered if isinstance(r["ms"], int)]
+        if model == "premium-chat":
+            premium_n += 1
+            if mode in ("premium","premium-chat"):
+                premium_forced += 1
+            if str(escal) == "1":
+                premium_escal += 1
 
-    tokens_total = sum(toks) if toks else 0
-    tokens_avg = (tokens_total/len(toks)) if toks else None
+        if model == "best-effort-chat":
+            be_n += 1
+            if mode in ("best-effort","best-effort-chat","hard"):
+                be_forced += 1
 
-    ms_p50 = percentile(ms, 50)
-    ms_p95 = percentile(ms, 95)
-    ms_avg = (sum(ms)/len(ms)) if ms else None
+    total_tokens = sum(tokens_list) if tokens_list else 0
+    avg_tokens = (total_tokens / req) if req else 0.0
 
-    # per-model stats
-    per = defaultdict(lambda: {"n":0,"ok":0,"tokens":[],"ms":[],"modes":defaultdict(int)})
-    for r in filtered:
-        s = per[r["model"]]
-        s["n"] += 1
-        if r["status"] == "ok" and r["rc"] == 0:
-            s["ok"] += 1
-        if isinstance(r["tokens"], int):
-            s["tokens"].append(r["tokens"])
-        if isinstance(r["ms"], int):
-            s["ms"].append(r["ms"])
-        s["modes"][r["mode"]] += 1
+    avg_ms = (sum(ms_list) / len(ms_list)) if ms_list else None
+    p50_ms = quantile(ms_list, 0.50) if ms_list else None
+    p95_ms = quantile(ms_list, 0.95) if ms_list else None
 
-    # premium escalation estimate: model=premium-chat but mode != premium
-    premium_total = sum(1 for r in filtered if r["model"] == "premium-chat")
-    premium_forced = sum(1 for r in filtered if r["model"] == "premium-chat" and r["mode"] == "premium")
-    premium_escalated = premium_total - premium_forced
+    print("== cost summary ==")
+    print(f"log: {log_path}")
+    print(f"window: last {hours:g}h (UTC)")
+    print(f"parsed: {parsed} / total_lines: {total_lines}  |  filtered: {filtered}")
+    print()
+    print(f"requests: {req}  ok: {ok}  empty/fail: {empty}")
+    print(f"tokens: total={total_tokens}  avg={avg_tokens:.2f}")
+    print(f"latency: avg={fmt_s(avg_ms)}  p50={fmt_s(p50_ms)}  p95={fmt_s(p95_ms)}")
+    print(f"premium-chat: {premium_n} (forced={premium_forced}, escalated≈{premium_escal})  |  best-effort-chat: {be_n} (forced={be_forced})")
+    print()
+    print(f"{'model':<20} {'n':>3} {'ok%':>5} {'tokens':>10} {'avg_tok':>8} {'p95_ms':>8} {'avg_ms':>8}")
+    print("-"*67)
 
-    best_effort_total = sum(1 for r in filtered if r["model"] == "best-effort-chat")
+    # sort by n desc
+    for model, st in sorted(per_model.items(), key=lambda x: x[1]["n"], reverse=True):
+        n = st["n"]
+        okp = pct(st["ok"], n)
+        tok = st["tokens"]
+        avg_tok_m = (tok / n) if n else 0.0
+        p95m = quantile(st["ms"], 0.95) if st["ms"] else None
+        avgm = (sum(st["ms"]) / len(st["ms"])) if st["ms"] else None
+        print(f"{model:<20} {n:>3} {okp:>5.0f}% {tok:>10} {avg_tok_m:>8.2f} {fmt_s(p95m):>8} {fmt_s(avgm):>8}")
 
-    print(f"== cost summary ==")
-    print(f"log: {path}")
-    print(f"window: {window}")
-    print(f"parsed: {len(rows)} / total_lines: {len(raw_lines)}  |  filtered: {total}")
-    print("")
-    print(f"requests: {total}  ok: {ok}  empty/fail: {empty}")
-    print(f"tokens: total={tokens_total}  avg={tokens_avg:.2f}" if tokens_avg is not None else f"tokens: total={tokens_total}  avg=-")
-    print(f"latency: avg={fmt_ms(ms_avg)}  p50={fmt_ms(ms_p50)}  p95={fmt_ms(ms_p95)}")
-    print(f"premium-chat: {premium_total} (forced={premium_forced}, escalated≈{premium_escalated})  |  best-effort-chat: {best_effort_total}")
-    print("")
-    # table
-    header = f"{'model':<18} {'n':>4} {'ok%':>5} {'tokens':>10} {'avg_tok':>8} {'p95_ms':>8} {'avg_ms':>8}"
-    print(header)
-    print("-"*len(header))
-
-    def model_sort_key(item):
-        model, s = item
-        tok_sum = sum(s["tokens"]) if s["tokens"] else 0
-        return (tok_sum, s["n"])
-
-    for model, s in sorted(per.items(), key=model_sort_key, reverse=True):
-        n = s["n"]
-        okp = (100.0*s["ok"]/n) if n else 0.0
-        tok_sum = sum(s["tokens"]) if s["tokens"] else 0
-        tok_avg = (tok_sum/len(s["tokens"])) if s["tokens"] else None
-        ms_p95_m = percentile(s["ms"], 95)
-        ms_avg_m = (sum(s["ms"])/len(s["ms"])) if s["ms"] else None
-        print(f"{model:<18} {n:>4} {okp:>4.0f}% {tok_sum:>10} {tok_avg:>8.2f} {fmt_ms(ms_p95_m):>8} {fmt_ms(ms_avg_m):>8}" if tok_avg is not None
-              else f"{model:<18} {n:>4} {okp:>4.0f}% {tok_sum:>10} {'-':>8} {fmt_ms(ms_p95_m):>8} {fmt_ms(ms_avg_m):>8}")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -11,8 +11,8 @@ debug() { [[ "${ROUTER_DEBUG:-0}" == "1" ]] && echo "[debug] $*" >&2 || true; }
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  ./scripts/ask.sh [--meta] [--profile <name|path>] <mode|auto> <text...>
-  echo "text" | ./scripts/ask.sh [--meta] [--profile <name|path>] <mode|auto> -
+  ./scripts/ask.sh [--meta] [--profile <name|path>] [--json] [--pretty] [--out <file>] <mode|auto> <text...>
+  echo "text" | ./scripts/ask.sh [--meta] [--profile <name|path>] [--json] [--pretty] [--out <file>] <mode|auto> -
 
 Modes:
   auto | daily | default | coding | long | hard | best-effort | premium
@@ -22,9 +22,14 @@ Profiles:
   --profile debug   -> infra/profiles/debug.txt
   --profile <path>  -> use an explicit file path
 
+JSON:
+  --json            -> force a single JSON object output (no markdown / no code fences)
+  --pretty          -> pretty-print JSON (only with --json)
+  --out <file>      -> also save JSON to a file (only with --json)
+
 Notes:
   - Default output: assistant content only (stdout).
-  - --meta prints: mode/model/rc/tokens/ms/escalated/profile (stderr).
+  - --meta prints: mode/model/rc/tokens/ms/escalated/profile/format (stderr).
 Env:
   LITELLM_BASE_URL    default: http://127.0.0.1:4000/v1
   LITELLM_MASTER_KEY  required (auto-load from .env if missing)
@@ -41,6 +46,9 @@ now_ms() { date +%s%3N; }
 META=0
 PROFILE_NAME="${ASK_PROFILE:-}"
 PROFILE_PATH=""
+JSON_MODE=0
+JSON_PRETTY=0
+JSON_OUT=""
 
 ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -50,6 +58,13 @@ while [[ $# -gt 0 ]]; do
     --profile)
       [[ $# -ge 2 ]] || { echo "ERROR: --profile requires a value" >&2; exit 2; }
       PROFILE_NAME="$2"; shift 2;;
+    --json)
+      JSON_MODE=1; shift;;
+    --pretty)
+      JSON_PRETTY=1; shift;;
+    --out)
+      [[ $# -ge 2 ]] || { echo "ERROR: --out requires a file path" >&2; exit 2; }
+      JSON_OUT="$2"; shift 2;;
     --help|-h)
       usage; exit 0;;
     *)
@@ -69,6 +84,11 @@ if [[ "${TEXT_IN}" == "-" ]]; then
   TEXT="$(cat)"
 else
   TEXT="${TEXT_IN}"
+fi
+
+if [[ "${JSON_MODE}" -eq 0 && ( "${JSON_PRETTY}" -eq 1 || -n "${JSON_OUT}" ) ]]; then
+  echo "ERROR: --pretty/--out requires --json" >&2
+  exit 2
 fi
 
 # ---------- resolve profile path ----------
@@ -158,22 +178,74 @@ if [[ "${MODEL}" == "kimi-chat" || "${MODEL}" == "long-chat" ]]; then
   TEMP="1"
 fi
 
-debug "mode=${MODE} model=${MODEL} allow_escalation=${ALLOW_ESCALATION} temp=${TEMP} profile=${PROFILE_PATH:-none}"
+FORMAT_TAG="text"
+[[ "${JSON_MODE}" -eq 1 ]] && FORMAT_TAG="json"
+
+debug "mode=${MODE} model=${MODEL} allow_escalation=${ALLOW_ESCALATION} temp=${TEMP} profile=${PROFILE_PATH:-none} format=${FORMAT_TAG}"
 debug "api_url=${API_URL}"
 
+json_directive() {
+  cat <<'TXT'
+Return ONLY a single JSON object and nothing else.
+- No markdown, no code fences, no surrounding text.
+- Must be valid JSON (double quotes, no trailing commas).
+- Use this schema (keys required unless marked optional):
+
+{
+  "decision": "string",
+  "steps": ["string"],
+  "commands": ["string"],
+  "patches": [
+    {
+      "path": "string",
+      "content": "string"
+    }
+  ],
+  "verify": ["string"],
+  "risks": ["string"],
+  "notes": ["string"]  // optional
+}
+
+Rules:
+- If you have no commands or patches, return empty arrays.
+- Keep strings concise; do not embed markdown fences.
+TXT
+}
+
 build_payload() {
-  MODEL="$1" TEXT="$TEXT" TEMP="$TEMP" PROFILE_PATH="$PROFILE_PATH" python3 - <<'PY'
+  MODEL="$1" TEXT="$TEXT" TEMP="$TEMP" PROFILE_PATH="$PROFILE_PATH" JSON_MODE="$JSON_MODE" python3 - <<'PY'
 import json, os, pathlib
+
 model = os.environ["MODEL"]
 text  = os.environ.get("TEXT","")
 temp  = float(os.environ.get("TEMP","0.2"))
 pp    = os.environ.get("PROFILE_PATH","").strip()
+json_mode = os.environ.get("JSON_MODE","0") == "1"
 
 messages = []
 if pp:
-  p = pathlib.Path(pp)
-  sys_txt = p.read_text(encoding="utf-8", errors="replace")
+  sys_txt = pathlib.Path(pp).read_text(encoding="utf-8", errors="replace")
   messages.append({"role":"system","content": sys_txt})
+
+if json_mode:
+  # second system message: hard constraint for machine-consumable output
+  directive = """Return ONLY a single JSON object and nothing else.
+No markdown, no code fences, no surrounding text. Must be valid JSON.
+
+Schema:
+{
+  "decision": "string",
+  "steps": ["string"],
+  "commands": ["string"],
+  "patches": [{"path":"string","content":"string"}],
+  "verify": ["string"],
+  "risks": ["string"],
+  "notes": ["string"]
+}
+
+If no commands/patches, use empty arrays. Keep strings concise."""
+  messages.append({"role":"system","content": directive})
+
 messages.append({"role":"user","content": text})
 
 print(json.dumps({
@@ -273,6 +345,75 @@ else:
 PY
 }
 
+# ---------- json sanitizer/validator ----------
+sanitize_json() {
+  local input="$1"
+  python3 - "$input" <<'PY'
+import json, sys
+
+s = sys.argv[1]
+
+def try_load(x):
+  try:
+    return json.loads(x)
+  except Exception:
+    return None
+
+obj = try_load(s)
+
+if obj is None:
+  # attempt to extract first {...last} block
+  a = s.find("{")
+  b = s.rfind("}")
+  if a != -1 and b != -1 and b > a:
+    candidate = s[a:b+1]
+    obj = try_load(candidate)
+
+if obj is None or not isinstance(obj, dict):
+  sys.exit(2)
+
+# any missing keys? enforce baseline keys exist (notes optional)
+required = ["decision","steps","commands","patches","verify","risks"]
+for k in required:
+  if k not in obj:
+    sys.exit(3)
+
+# normalize types to avoid weird model outputs
+def ensure_list_str(v):
+  if isinstance(v, list):
+    return [str(x) for x in v]
+  return []
+
+obj["steps"] = ensure_list_str(obj.get("steps"))
+obj["commands"] = ensure_list_str(obj.get("commands"))
+obj["verify"] = ensure_list_str(obj.get("verify"))
+obj["risks"] = ensure_list_str(obj.get("risks"))
+
+patches = obj.get("patches")
+if not isinstance(patches, list):
+  patches = []
+norm = []
+for p in patches:
+  if isinstance(p, dict):
+    path = p.get("path","")
+    content = p.get("content","")
+    if isinstance(path, str) and isinstance(content, str) and path.strip():
+      norm.append({"path": path.strip(), "content": content})
+obj["patches"] = norm
+
+print(json.dumps(obj, ensure_ascii=False))
+PY
+}
+
+pretty_json() {
+  local input="$1"
+  python3 - "$input" <<'PY'
+import json, sys
+obj = json.loads(sys.argv[1])
+print(json.dumps(obj, ensure_ascii=False, indent=2))
+PY
+}
+
 # ---------- call primary ----------
 ESCALATED=0
 MODEL_USED="${MODEL}"
@@ -336,10 +477,27 @@ if [[ "${RC}" -ne 200 || -z "${CONTENT}" ]]; then
   STATUS="empty"
 fi
 
-if [[ "${STATUS}" != "ok" && "${RC}" -eq 200 && ( "${META}" -eq 1 || "${ROUTER_DEBUG:-0}" == "1" ) ]]; then
-  echo "[debug] rc=200 but content empty. raw response (first 800 chars):" >&2
-  printf "%s" "${RESP}" | head -c 800 >&2
-  echo >&2
+# ---------- json mode post-process ----------
+JSON_VALID=1
+if [[ "${JSON_MODE}" -eq 1 && -n "${CONTENT}" && "${RC}" -eq 200 ]]; then
+  if ! CLEAN_JSON="$(sanitize_json "${CONTENT}")"; then
+    JSON_VALID=0
+  else
+    if [[ "${JSON_PRETTY}" -eq 1 ]]; then
+      CLEAN_JSON="$(pretty_json "${CLEAN_JSON}")"
+    fi
+    CONTENT="${CLEAN_JSON}"
+  fi
+fi
+
+if [[ "${JSON_MODE}" -eq 1 && "${JSON_VALID}" -eq 0 ]]; then
+  STATUS="json_invalid"
+  echo "ERROR: model did not return valid JSON (or schema mismatch)." >&2
+  if [[ "${ROUTER_DEBUG:-0}" == "1" || "${META}" -eq 1 ]]; then
+    echo "[debug] raw content (first 800 chars):" >&2
+    printf "%s" "${CONTENT}" | head -c 800 >&2
+    echo >&2
+  fi
 fi
 
 # ---------- logging ----------
@@ -347,19 +505,26 @@ LOG_FILE="${ASK_LOG_FILE:-${LOG_FILE_DEFAULT}}"
 LOG_FILE="$(printf "%s" "${LOG_FILE}" | strip_crlf)"
 PROFILE_TAG="${PROFILE_NAME:-}"
 
-printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s\n" \
-  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" >> "${LOG_FILE}"
+printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s format=%s\n" \
+  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" "${FORMAT_TAG}" >> "${LOG_FILE}"
 
 # ---------- output ----------
-if [[ -n "${CONTENT}" ]]; then
+if [[ -n "${CONTENT}" && "${STATUS}" != "empty" && "${STATUS}" != "json_invalid" ]]; then
   printf "%s\n" "${CONTENT}"
+  if [[ "${JSON_MODE}" -eq 1 && -n "${JSON_OUT}" ]]; then
+    mkdir -p "$(dirname "${JSON_OUT}")" 2>/dev/null || true
+    printf "%s\n" "${CONTENT}" > "${JSON_OUT}"
+  fi
 else
+  if [[ "${STATUS}" == "json_invalid" ]]; then
+    exit 11
+  fi
   printf "ERROR: empty response (rc=%s)\n" "${RC}" >&2
 fi
 
 if [[ "${META}" -eq 1 ]]; then
-  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s\n" \
-    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" >&2
+  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s format=%s\n" \
+    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" "${FORMAT_TAG}" >&2
 fi
 
 [[ "${STATUS}" == "ok" ]] || exit 10
