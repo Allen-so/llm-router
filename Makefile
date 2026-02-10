@@ -1,23 +1,26 @@
 SHELL := /bin/bash
+.NOTPARALLEL:
 
 MODE ?= auto
 TEXT ?= Say ROUTER_OK
 API_BASE ?= http://127.0.0.1:4000
+MODEL ?= default-chat
 
-.PHONY: help up ready upready down ps logs check ask doctor demo replay_latest
+PLAN_TEXT_FILE := artifacts/tmp/plan_input.txt
+
+.PHONY: help up ready upready down ps logs check ask doctor demo replay_latest plan scaffold gen qa
 
 help:
 	@echo "Targets:"
-	@echo "  make up                  - docker compose up -d"
-	@echo "  make ready               - wait until router is ready"
-	@echo "  make upready             - up + ready"
-	@echo "  make check               - ps + curl models + one ask"
-	@echo "  make ask MODE=auto TEXT='...'"
-	@echo "  make demo MODE=auto TEXT='...'"
-	@echo "  make replay_latest       - replay last demo run"
-	@echo "  make doctor              - run scripts/doctor.sh"
-	@echo "  make logs                - tail litellm logs"
-	@echo "  make down                - docker compose down"
+	@echo "  make upready                         - up + wait_ready"
+	@echo "  make check                           - ps + curl models + ask"
+	@echo "  make demo MODE=auto TEXT='...'       - demo run (text)"
+	@echo "  make replay_latest                   - replay last demo run"
+	@echo "  make plan MODEL=default-chat TEXT='...'   - generate plan.json (JSON-only, auto-retry)"
+	@echo "  make scaffold                        - scaffold from LATEST plan.json"
+	@echo "  make gen TEXT='...'                  - upready + plan + scaffold (atomic)"
+	@echo "  make doctor                          - repo + env + port checks"
+	@echo "  make qa                              - global QA"
 
 up:
 	docker compose up -d
@@ -55,3 +58,19 @@ demo:
 
 replay_latest:
 	python3 apps/router-demo/replay.py --run-dir "$$(cat artifacts/runs/LATEST)" --api-base "$(API_BASE)"
+
+plan:
+	@mkdir -p artifacts/tmp
+	@printf '%s' "$(TEXT)" > "$(PLAN_TEXT_FILE)"
+	python3 apps/router-demo/plan.py --text-file "$(PLAN_TEXT_FILE)" --api-base "$(API_BASE)" --model "$(MODEL)"
+
+scaffold:
+	python3 apps/router-demo/scaffold.py
+
+gen:
+	$(MAKE) upready
+	$(MAKE) plan
+	$(MAKE) scaffold
+
+qa:
+	./scripts/qa_all.sh
