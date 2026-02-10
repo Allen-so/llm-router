@@ -4,23 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 LOG_FILE_DEFAULT="${LOG_DIR}/ask_history.log"
+PROFILES_DIR="${ROOT_DIR}/infra/profiles"
 
 debug() { [[ "${ROUTER_DEBUG:-0}" == "1" ]] && echo "[debug] $*" >&2 || true; }
 
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  ./scripts/ask.sh [--meta] <mode|auto> <text...>
-  echo "text" | ./scripts/ask.sh [--meta] <mode|auto> -
+  ./scripts/ask.sh [--meta] [--profile <name|path>] <mode|auto> <text...>
+  echo "text" | ./scripts/ask.sh [--meta] [--profile <name|path>] <mode|auto> -
 
 Modes:
   auto | daily | default | coding | long | hard | best-effort | premium
+
+Profiles:
+  --profile dev     -> infra/profiles/dev.txt
+  --profile debug   -> infra/profiles/debug.txt
+  --profile <path>  -> use an explicit file path
+
 Notes:
   - Default output: assistant content only (stdout).
-  - --meta prints: mode/model/rc/tokens/ms/escalated (stderr).
+  - --meta prints: mode/model/rc/tokens/ms/escalated/profile (stderr).
 Env:
   LITELLM_BASE_URL    default: http://127.0.0.1:4000/v1
   LITELLM_MASTER_KEY  required (auto-load from .env if missing)
+  ASK_PROFILE         optional default profile name
   ROUTER_DEBUG=1      debug to stderr
 EOF
 }
@@ -31,12 +39,21 @@ now_ms() { date +%s%3N; }
 
 # ---------- args ----------
 META=0
+PROFILE_NAME="${ASK_PROFILE:-}"
+PROFILE_PATH=""
+
 ARGS=()
-for a in "$@"; do
-  case "$a" in
-    --meta) META=1 ;;
-    --help|-h) usage; exit 0 ;;
-    *) ARGS+=("$a") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --meta)
+      META=1; shift;;
+    --profile)
+      [[ $# -ge 2 ]] || { echo "ERROR: --profile requires a value" >&2; exit 2; }
+      PROFILE_NAME="$2"; shift 2;;
+    --help|-h)
+      usage; exit 0;;
+    *)
+      ARGS+=("$1"); shift;;
   esac
 done
 
@@ -52,6 +69,29 @@ if [[ "${TEXT_IN}" == "-" ]]; then
   TEXT="$(cat)"
 else
   TEXT="${TEXT_IN}"
+fi
+
+# ---------- resolve profile path ----------
+if [[ -n "${PROFILE_NAME}" ]]; then
+  if [[ "${PROFILE_NAME}" == *"/"* || "${PROFILE_NAME}" == *.txt || "${PROFILE_NAME}" == *.md ]]; then
+    PROFILE_PATH="${PROFILE_NAME}"
+  else
+    if [[ -f "${PROFILES_DIR}/${PROFILE_NAME}.txt" ]]; then
+      PROFILE_PATH="${PROFILES_DIR}/${PROFILE_NAME}.txt"
+    elif [[ -f "${PROFILES_DIR}/${PROFILE_NAME}.md" ]]; then
+      PROFILE_PATH="${PROFILES_DIR}/${PROFILE_NAME}.md"
+    else
+      echo "ERROR: profile not found: ${PROFILE_NAME}" >&2
+      echo "Available profiles:" >&2
+      ls -1 "${PROFILES_DIR}" 2>/dev/null || true
+      exit 2
+    fi
+  fi
+
+  if [[ ! -f "${PROFILE_PATH}" ]]; then
+    echo "ERROR: profile file not found: ${PROFILE_PATH}" >&2
+    exit 2
+  fi
 fi
 
 # ---------- env/auth ----------
@@ -118,19 +158,28 @@ if [[ "${MODEL}" == "kimi-chat" || "${MODEL}" == "long-chat" ]]; then
   TEMP="1"
 fi
 
-debug "mode=${MODE} model=${MODEL} allow_escalation=${ALLOW_ESCALATION} temp=${TEMP}"
+debug "mode=${MODE} model=${MODEL} allow_escalation=${ALLOW_ESCALATION} temp=${TEMP} profile=${PROFILE_PATH:-none}"
 debug "api_url=${API_URL}"
 
 build_payload() {
-  MODEL="$1" TEXT="$TEXT" TEMP="$TEMP" python3 - <<'PY'
-import json, os
+  MODEL="$1" TEXT="$TEXT" TEMP="$TEMP" PROFILE_PATH="$PROFILE_PATH" python3 - <<'PY'
+import json, os, pathlib
 model = os.environ["MODEL"]
 text  = os.environ.get("TEXT","")
 temp  = float(os.environ.get("TEMP","0.2"))
+pp    = os.environ.get("PROFILE_PATH","").strip()
+
+messages = []
+if pp:
+  p = pathlib.Path(pp)
+  sys_txt = p.read_text(encoding="utf-8", errors="replace")
+  messages.append({"role":"system","content": sys_txt})
+messages.append({"role":"user","content": text})
+
 print(json.dumps({
   "model": model,
   "temperature": temp,
-  "messages": [{"role":"user","content": text}]
+  "messages": messages
 }))
 PY
 }
@@ -147,13 +196,12 @@ post_chat() {
     "${API_URL}"
 }
 
-# ---------- file-based extractor (bypasses stdin/pipe weirdness) ----------
+# ---------- file-based extractor ----------
 extract_from_file() {
   local file="$1"
   local kind="$2"   # content | tokens
   python3 - "$file" "$kind" <<'PY'
 import json, sys
-
 path = sys.argv[1]
 kind = sys.argv[2]
 
@@ -173,7 +221,6 @@ except Exception:
   sys.exit(0)
 
 def get_content(o):
-  # chat.completions
   choices = o.get("choices")
   if isinstance(choices, list) and choices and isinstance(choices[0], dict):
     ch = choices[0]
@@ -197,7 +244,6 @@ def get_content(o):
     if isinstance(delta, dict) and isinstance(delta.get("content"), str):
       return delta["content"]
 
-  # fallbacks
   ot = o.get("output_text")
   if isinstance(ot, str) and ot:
     return ot
@@ -299,9 +345,10 @@ fi
 # ---------- logging ----------
 LOG_FILE="${ASK_LOG_FILE:-${LOG_FILE_DEFAULT}}"
 LOG_FILE="$(printf "%s" "${LOG_FILE}" | strip_crlf)"
+PROFILE_TAG="${PROFILE_NAME:-}"
 
-printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s\n" \
-  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" >> "${LOG_FILE}"
+printf "%s mode=%s model=%s status=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s\n" \
+  "$(ts_utc)" "${MODE}" "${MODEL_USED}" "${STATUS}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" >> "${LOG_FILE}"
 
 # ---------- output ----------
 if [[ -n "${CONTENT}" ]]; then
@@ -311,8 +358,8 @@ else
 fi
 
 if [[ "${META}" -eq 1 ]]; then
-  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s\n" \
-    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" >&2
+  printf "meta: mode=%s model=%s rc=%s tokens=%s ms=%s escalated=%s profile=%s\n" \
+    "${MODE}" "${MODEL_USED}" "${RC}" "${TOKENS:-}" "${MS}" "${ESCALATED}" "${PROFILE_TAG}" >&2
 fi
 
 [[ "${STATUS}" == "ok" ]] || exit 10
