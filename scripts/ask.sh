@@ -21,6 +21,7 @@ Profiles:
   --profile dev     -> infra/profiles/dev.txt
   --profile debug   -> infra/profiles/debug.txt
   --profile <path>  -> use an explicit file path
+  --no-profile      -> disable profile for this call
 
 JSON:
   --json            -> force a single JSON object output (no markdown / no code fences)
@@ -58,6 +59,10 @@ while [[ $# -gt 0 ]]; do
     --profile)
       [[ $# -ge 2 ]] || { echo "ERROR: --profile requires a value" >&2; exit 2; }
       PROFILE_NAME="$2"; shift 2;;
+    --no-profile)
+      PROFILE_NAME=""
+      PROFILE_PATH=""
+      shift;;
     --json)
       JSON_MODE=1; shift;;
     --pretty)
