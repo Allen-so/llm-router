@@ -90,6 +90,7 @@ artifacts/runs/run_*/plan.json
 apps/generated/<name>/RUN_INSTRUCTIONS.txt
 
 apps/generated/<name>/.generated_from_run
+
 QA / Diagnostics
 make qa
 ls -1t logs/qa_*.log | head
@@ -97,4 +98,6 @@ ls -1t logs/qa_*.log | head
 ./scripts/secrets_scan.sh
 
 <!-- AI-PLATFORM-QUICKSTART-END -->
+
+
 
