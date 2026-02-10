@@ -25,3 +25,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# --- dev scratch / backups ---
+*.bak.*
+artifacts/last_*.json
+artifacts/doctor_patch*.json
+infra/profiles/patch.txt
+backups/dev_scratch/
