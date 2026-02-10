@@ -4,6 +4,19 @@ from pathlib import Path
 from urllib import request as urlreq
 from urllib.error import HTTPError, URLError
 
+ROOT = Path("/home/suxiaocong/ai-platform")
+ENV_PATH = ROOT / ".env"
+
+def load_master_key() -> str:
+    mk = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+    if mk:
+        return mk
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("LITELLM_MASTER_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
 def http_post_json(url: str, headers: dict, payload: dict, timeout: int = 120):
     body = json.dumps(payload).encode("utf-8")
     req = urlreq.Request(url, data=body, headers={**headers, "Content-Type": "application/json"}, method="POST")
@@ -36,7 +49,7 @@ def main():
 
     payload = json.loads(req_path.read_text(encoding="utf-8"))
 
-    master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+    master_key = load_master_key()
     headers = {}
     if master_key:
         headers["Authorization"] = f"Bearer {master_key}"
