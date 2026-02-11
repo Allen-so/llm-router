@@ -66,6 +66,5 @@ plan:
 
 scaffold:
 	python3 apps/router-demo/scaffold.py $(if $(filter 1,$(FORCE)),--force,)
-
 qa:
 	./scripts/qa_all.sh
