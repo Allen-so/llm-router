@@ -44,7 +44,15 @@ check: ps ready
 	@echo "[check] curl /v1/models =>"
 	@curl -sS -o /dev/null -w 'HTTP=%{http_code}\n' $(API_BASE)/v1/models || true
 	@echo "[check] ask.sh =>"
-	./scripts/ask.sh --meta auto "Reply with exactly ROUTER_OK and nothing else." || true
+	@echo "[check] ask strict =>"
+	@OUT="$$(./scripts/ask.sh --meta auto \"Reply with exactly ROUTER_OK and nothing else.\")" || { echo "[fail] ask.sh failed"; exit 1; }; \
+	FIRST="$$(printf '%s\n' "$$OUT" | head -n1 | tr -d '\r')"; \
+	if [[ "$$FIRST" != "ROUTER_OK" ]]; then \
+	  echo "[fail] ask did not return exact ROUTER_OK"; \
+	  echo "$$OUT"; \
+	  exit 1; \
+	fi; \
+	echo "$$OUT"
 	@echo "[check] last log =>"
 	@tail -n 1 logs/ask_history.log || true
 
