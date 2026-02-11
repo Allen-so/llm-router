@@ -46,3 +46,9 @@ apps/generated/
 artifacts/tmp/
 logs/qa_*.log
 logs/ask_history.log
+
+# generated apps (local)
+apps/generated/
+
+# temp artifacts
+artifacts/tmp/

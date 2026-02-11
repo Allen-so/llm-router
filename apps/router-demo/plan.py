@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, json, os, re, time, uuid
+import argparse, json, os, sys, time, uuid, re
 from pathlib import Path
 from urllib import request as urlreq
 from urllib.error import HTTPError, URLError
@@ -8,6 +8,8 @@ ROOT = Path("/home/suxiaocong/ai-platform")
 RUNS_DIR = ROOT / "artifacts" / "runs"
 ENV_PATH = ROOT / ".env"
 
+NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{2,40}$")
+
 def load_master_key() -> str:
     mk = os.environ.get("LITELLM_MASTER_KEY", "").strip()
     if mk:
@@ -15,193 +17,277 @@ def load_master_key() -> str:
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
             if line.startswith("LITELLM_MASTER_KEY="):
-                v = line.split('=', 1)[1].strip()
-                return v.strip().strip('"').strip("'")
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
     return ""
 
+def normalize_v1(api_base: str) -> str:
+    b = (api_base or "").strip().rstrip("/")
+    if b.endswith("/v1"):
+        return b
+    return b + "/v1"
+
 def http_post_json(url: str, headers: dict, payload: dict, timeout: int = 120):
-    body = json.dumps(payload).encode('utf-8')
-    req = urlreq.Request(url, data=body, headers={**headers, 'Content-Type': 'application/json'}, method='POST')
+    body = json.dumps(payload).encode("utf-8")
+    req = urlreq.Request(url, data=body, headers={**headers, "Content-Type": "application/json"}, method="POST")
+    with urlreq.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        return resp.status, json.loads(raw), raw
+
+def extract_json_object(text: str) -> dict:
+    """
+    Best-effort extraction:
+    1) direct json.loads
+    2) ```json ... ```
+    3) first '{' .. last '}' slice
+    """
+    t = (text or "").strip()
+    # 1) direct
     try:
-        with urlreq.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode('utf-8', errors='replace')
-            return resp.status, json.loads(raw)
-    except HTTPError as e:
-        raw = ''
-        try:
-            raw = e.read().decode('utf-8', errors='replace')
-        except Exception:
-            raw = str(e)
-        try:
-            return e.code, json.loads(raw) if raw else {'error': str(e)}
-        except Exception:
-            return e.code, {'error': raw or str(e)}
-    except URLError as e:
-        return 0, {'error': f'URLError: {e}'}
-    except Exception as e:
-        return 0, {'error': str(e)}
+        obj = json.loads(t)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
 
-def strip_code_fences(s: str) -> str:
-    s = (s or '').strip()
-    if s.startswith('```'):
-        s = re.sub(r'^```[a-zA-Z0-9_-]*\s*', '', s)
-        s = re.sub(r'\s*```$', '', s)
-    return s.strip()
+    # 2) fenced
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", t, flags=re.S | re.I)
+    if m:
+        cand = m.group(1).strip()
+        obj = json.loads(cand)
+        if isinstance(obj, dict):
+            return obj
 
-def extract_json_object(s: str):
-    s = strip_code_fences(s)
-    if s.startswith('{') and s.endswith('}'):
-        return s
-    i = s.find('{')
-    j = s.rfind('}')
+    # 3) slice
+    i = t.find("{")
+    j = t.rfind("}")
     if i != -1 and j != -1 and j > i:
-        return s[i:j+1]
-    return None
+        cand = t[i : j + 1]
+        obj = json.loads(cand)
+        if isinstance(obj, dict):
+            return obj
+
+    raise ValueError("no JSON object found")
+
+def validate_rel_path(p: str):
+    if not isinstance(p, str):
+        raise ValueError("files[].path must be string")
+    p = p.strip()
+    if not p:
+        raise ValueError("files[].path empty")
+    if len(p) > 200:
+        raise ValueError("files[].path too long (>200)")
+    if p.startswith(("/", "\\", "~")):
+        raise ValueError("files[].path must be relative (no leading /, \\, ~)")
+    if re.match(r"^[A-Za-z]:", p):
+        raise ValueError("files[].path must not be windows drive path")
+    # block traversal
+    parts = Path(p).parts
+    if any(seg in ("..",) for seg in parts):
+        raise ValueError("files[].path must not contain '..'")
+    # normalize to forward slashes in output expectation (optional)
+    # allow subfolders, but no weird control chars
+    if any(ord(ch) < 32 for ch in p):
+        raise ValueError("files[].path has control chars")
 
 def validate_plan(plan: dict):
-    # schema_version is required (we may inject it if missing, for compatibility)
-    for k in ('schema_version', 'name', 'type', 'description', 'files', 'run'):
-        if k not in plan:
-            raise ValueError(f'missing key: {k}')
-    if plan['schema_version'] != 1:
-        raise ValueError('schema_version must be 1')
-    name = plan['name']
-    if (not isinstance(name, str)) or (not re.match(r'^[a-z][a-z0-9_-]{2,40}$', name)):
-        raise ValueError('invalid name (^[a-z][a-z0-9_-]{2,40}$)')
-    if plan['type'] != 'python-cli':
-        raise ValueError('type must be "python-cli"')
-    if not isinstance(plan['description'], str) or not plan['description'].strip():
-        raise ValueError('description must be non-empty string')
-    files = plan['files']
-    if not isinstance(files, list) or len(files) < 2:
-        raise ValueError('files must be an array with at least 2 items')
-    for f in files:
-        if not isinstance(f, dict) or 'path' not in f or 'content' not in f:
-            raise ValueError('each files[] item must be {path, content}')
-        path = f['path']
-        if not isinstance(path, str) or not path or len(path) > 200:
-            raise ValueError('invalid file path')
-        if path.startswith('/') or '..' in Path(path).parts:
-            raise ValueError(f'unsafe file path: {path}')
-        if not isinstance(f['content'], str) or not f['content']:
-            raise ValueError(f'empty content: {path}')
-    run = plan['run']
-    if not isinstance(run, dict) or 'commands' not in run:
-        raise ValueError('run.commands missing')
-    if not isinstance(run['commands'], list) or len(run['commands']) < 1:
-        raise ValueError('run.commands must be a non-empty array')
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be a JSON object")
 
-SYSTEM = (
-    'You are a software generator. Output MUST be valid JSON and MUST match this contract:\n'
-    '- Top-level keys: schema_version, name, type, description, files, run\n'
-    '- schema_version must be 1\n'
-    '- type must be "python-cli"\n'
-    '- files is an array of {path, content}\n'
-    '- Minimal runnable Python CLI project (stdlib only):\n'
-    '  * README.md\n'
-    '  * pyproject.toml (preferred) OR requirements.txt\n'
-    '  * src/<name>/__init__.py\n'
-    '  * src/<name>/cli.py (argparse only)\n'
-    '- run.commands must be runnable after scaffold when CWD is the generated project folder, e.g. python -m <name>.cli --help\n'
-    '\nRules:\n'
-    '- Output JSON ONLY. No markdown. No code fences. No extra commentary.\n'
-)
+    allowed_top = {"schema_version", "name", "type", "description", "files", "run"}
+    extra = set(plan.keys()) - allowed_top
+    if extra:
+        raise ValueError(f"extra top-level keys not allowed: {sorted(extra)}")
+
+    sv = plan.get("schema_version")
+    if sv != 1:
+        raise ValueError("schema_version must be 1")
+
+    name = plan.get("name")
+    if not isinstance(name, str) or not NAME_RE.match(name):
+        raise ValueError("name invalid (must match ^[a-z][a-z0-9_-]{2,40}$)")
+
+    typ = plan.get("type")
+    if typ != "python-cli":
+        raise ValueError("type must be 'python-cli'")
+
+    desc = plan.get("description")
+    if not isinstance(desc, str) or not (1 <= len(desc) <= 280):
+        raise ValueError("description must be 1..280 chars")
+
+    files = plan.get("files")
+    if not isinstance(files, list) or len(files) < 2:
+        raise ValueError("files must be an array with >=2 items")
+
+    saw_pyproject = False
+    saw_src = False
+
+    for i, f in enumerate(files):
+        if not isinstance(f, dict):
+            raise ValueError(f"files[{i}] must be object")
+        allowed_file = {"path", "content"}
+        extra_f = set(f.keys()) - allowed_file
+        if extra_f:
+            raise ValueError(f"files[{i}] extra keys not allowed: {sorted(extra_f)}")
+
+        path = f.get("path")
+        content = f.get("content")
+
+        validate_rel_path(path)
+
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"files[{i}].content empty")
+        if len(content) > 20000:
+            raise ValueError(f"files[{i}].content too long (>20000)")
+
+        if path == "pyproject.toml":
+            saw_pyproject = True
+        if path.startswith("src/"):
+            saw_src = True
+
+    if not (saw_pyproject and saw_src):
+        raise ValueError("files must include pyproject.toml and at least one src/... file")
+
+    run = plan.get("run")
+    if not isinstance(run, dict):
+        raise ValueError("run must be object")
+    extra_run = set(run.keys()) - {"commands"}
+    if extra_run:
+        raise ValueError(f"run extra keys not allowed: {sorted(extra_run)}")
+
+    cmds = run.get("commands")
+    if not isinstance(cmds, list) or len(cmds) < 1:
+        raise ValueError("run.commands must be a non-empty array")
+    if len(cmds) > 20:
+        raise ValueError("run.commands too many (>20)")
+
+    for k, c in enumerate(cmds):
+        if not isinstance(c, str) or not c.strip():
+            raise ValueError(f"run.commands[{k}] empty")
+        if len(c) > 300:
+            raise ValueError(f"run.commands[{k}] too long (>300)")
+
+def build_system_prompt() -> str:
+    return (
+        "You must output ONLY a single JSON object (no markdown, no code fences, no commentary). "
+        "Schema:\n"
+        "{\n"
+        '  "schema_version": 1,\n'
+        '  "name": "lowercase slug 3..41 chars, regex ^[a-z][a-z0-9_-]{2,40}$",\n'
+        '  "type": "python-cli",\n'
+        '  "description": "1..280 chars",\n'
+        '  "files": [ {"path": "relative/path", "content": "file content"}, ... ] (>=2 items),\n'
+        '  "run": {"commands": ["shell command", ...]} (>=1)\n'
+        "}\n"
+        "Constraints:\n"
+        "- top-level keys must be EXACTLY: schema_version,name,type,description,files,run\n"
+        "- files[].path must be RELATIVE, no leading /, no .., no windows drive\n"
+        "- include pyproject.toml and at least one src/... file\n"
+        "- keep file contents concise (each <=20000 chars)\n"
+    )
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--text', default=None)
-    ap.add_argument('--text-file', default=None)
-    ap.add_argument('--api-base', default='http://127.0.0.1:4000')
-    ap.add_argument('--model', default='default-chat')
-    ap.add_argument('--timeout', type=int, default=120)
-    ap.add_argument('--retries', type=int, default=3)
+    ap.add_argument("--api-base", default="http://127.0.0.1:4000")
+    ap.add_argument("--model", default="default-chat")
+    ap.add_argument("--text", default=None)
+    ap.add_argument("--text-file", default=None)
+    ap.add_argument("--timeout", type=int, default=120)
+    ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--sleep", type=float, default=0.6)
     args = ap.parse_args()
 
     if not args.text and not args.text_file:
-        raise SystemExit('need --text or --text-file')
-    text = args.text
-    if args.text_file:
-        text = Path(args.text_file).read_text(encoding='utf-8')
-    text = (text or '').strip()
-    if not text:
-        raise SystemExit('empty text')
+        raise SystemExit("Provide --text or --text-file")
 
-    run_id = time.strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8]
-    run_dir = RUNS_DIR / f'run_{run_id}'
+    user_text = args.text
+    if args.text_file:
+        user_text = Path(args.text_file).read_text(encoding="utf-8", errors="ignore")
+
+    master = load_master_key()
+    if not master:
+        print("[warn] LITELLM_MASTER_KEY not found (plan may 401).", file=sys.stderr)
+
+    v1 = normalize_v1(args.api_base)
+    url = f"{v1}/chat/completions"
+
+    headers = {"Authorization": f"Bearer {master}"} if master else {}
+
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir = RUNS_DIR / f"run_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    headers = {}
-    mk = load_master_key()
-    if mk:
-        headers['Authorization'] = f'Bearer {mk}'
-
-    base_messages = [
-        {'role': 'system', 'content': ''.join(SYSTEM)},
-        {'role': 'user', 'content': text},
+    # base payload
+    sys_prompt = build_system_prompt()
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_text.strip()},
     ]
 
-    last_err = None
-    for attempt in range(1, max(1, args.retries) + 1):
-        messages = list(base_messages)
-        if attempt > 1 and last_err:
-            messages.append({'role': 'user', 'content': f'Previous output invalid ({last_err}). Return ONLY corrected JSON. No extra text.'})
+    last_err = "unknown"
+    last_raw = ""
 
+    for attempt in range(1, args.retries + 1):
         payload = {
-            'model': args.model,
-            'messages': messages,
-            'temperature': 0.0 if attempt > 1 else 0.1,
-            'max_tokens': 2200,
-            'response_format': {'type': 'json_object'},
+            "model": args.model,
+            "messages": messages,
+            "temperature": 0,
         }
-        (run_dir / f'plan_request_attempt{attempt}.json').write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
 
-        status, resp = http_post_json(
-            url=f"{args.api_base.rstrip('/')}/v1/chat/completions",
-            headers=headers,
-            payload=payload,
-            timeout=args.timeout,
+        (run_dir / f"request_attempt_{attempt}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8"
         )
-        (run_dir / f'plan_raw_response_attempt{attempt}.json').write_text(json.dumps(resp, indent=2, ensure_ascii=False), encoding='utf-8')
-
-        content = ''
-        try:
-            content = resp['choices'][0]['message'].get('content') or ''
-        except Exception:
-            content = ''
-
-        if status != 200 or not content.strip():
-            last_err = f'HTTP={status} or empty content'
-            continue
-
-        extracted = extract_json_object(content) or ''
-        try:
-            plan = json.loads(extracted if extracted else content)
-        except Exception:
-            (run_dir / f'plan_invalid_attempt{attempt}.txt').write_text(content, encoding='utf-8')
-            last_err = 'not valid JSON'
-            continue
-
-        if 'schema_version' not in plan:
-            plan['schema_version'] = 1
 
         try:
+            status, resp_json, raw = http_post_json(url, headers, payload, timeout=args.timeout)
+            last_raw = raw
+            (run_dir / f"response_attempt_{attempt}.json").write_text(raw + "\n", encoding="utf-8")
+
+            # extract model content
+            content = ""
+            try:
+                content = resp_json["choices"][0]["message"]["content"]
+            except Exception:
+                raise ValueError("unexpected response format (missing choices[0].message.content)")
+
+            plan = extract_json_object(content)
             validate_plan(plan)
+
+            # success -> save plan.json + LATEST
+            (run_dir / "plan.json").write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8"
+            )
+            (run_dir / "plan_raw.txt").write_text(content + "\n", encoding="utf-8")
+
+            (RUNS_DIR / "LATEST").write_text(str(run_dir) + "\n", encoding="utf-8")
+
+            print(f"[ok] plan saved: {run_dir}/plan.json")
+            print(str(run_dir))
+            return
+
+        except (HTTPError, URLError) as e:
+            last_err = f"http error: {getattr(e, 'code', None)} {e}"
         except Exception as e:
-            (run_dir / f'plan_invalid_attempt{attempt}.txt').write_text(content, encoding='utf-8')
-            (run_dir / f'plan_validation_error_attempt{attempt}.txt').write_text(str(e), encoding='utf-8')
-            last_err = f'validation failed: {e}'
-            continue
+            last_err = str(e)
 
-        (run_dir / 'plan.json').write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding='utf-8')
-        (RUNS_DIR / 'LATEST').write_text(str(run_dir), encoding='utf-8')
-        print(f'[ok] plan saved: {run_dir / "plan.json"}')
-        print(str(run_dir))
-        return
+        # save invalid output
+        (run_dir / "plan_invalid.txt").write_text(
+            f"attempt={attempt}\nerror={last_err}\n\nRAW_RESPONSE:\n{last_raw}\n",
+            encoding="utf-8"
+        )
 
-    (run_dir / 'plan_final_error.txt').write_text(str(last_err or 'unknown'), encoding='utf-8')
-    print('[fail] plan failed; see artifacts in:')
-    print(str(run_dir))
-    raise SystemExit(2)
+        # tighten instruction for next attempt
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_text.strip()},
+            {"role": "user", "content": f"Your previous output was invalid: {last_err}. Return corrected JSON ONLY."},
+        ]
 
-if __name__ == '__main__':
+        time.sleep(args.sleep)
+
+    print("[fail] could not produce valid plan.json after retries", file=sys.stderr)
+    sys.exit(2)
+
+if __name__ == "__main__":
     main()
