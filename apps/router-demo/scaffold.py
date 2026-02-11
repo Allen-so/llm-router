@@ -22,6 +22,14 @@ def safe_join(base: Path, rel: str) -> Path:
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 
+def same_hash(existing: str, plan_sha: str) -> bool:
+    e = (existing or '').strip()
+    p = (plan_sha or '').strip()
+    if not e or not p:
+        return False
+    # allow stored prefix (e.g. 12 chars) to match full sha
+    return p.startswith(e) if len(e) < len(p) else (e == p)
+
 def alt_name(name: str, plan_sha: str) -> str:
     # stable, short suffix to avoid collisions
     return f"{name}__{plan_sha[:12]}"
@@ -98,7 +106,7 @@ def main():
         existing_sha = sha_path.read_text(encoding="utf-8", errors="ignore").strip() if sha_path.exists() else ""
 
         # Idempotent: same plan hash => OK (do not fail)
-        if existing_sha and existing_sha == plan_sha and not args.force:
+        if existing_sha and same_hash(existing_sha, plan_sha) and not args.force:
             print(f"[ok] already generated (same plan hash): {out_root}")
             print(f"[hint] see: {out_root}/RUN_INSTRUCTIONS.txt")
             return 0
