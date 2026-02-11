@@ -1,179 +1,192 @@
 #!/usr/bin/env python3
-import argparse, json, time, hashlib, shutil
-from pathlib import Path
-import uuid
+import argparse
+import hashlib
+import json
 import shutil
+import time
+import uuid
+from pathlib import Path
 
 ROOT = Path("/home/suxiaocong/ai-platform")
 GENERATED = ROOT / "apps" / "generated"
 RUNS_DIR = ROOT / "artifacts" / "runs"
 
-def safe_join(base: Path, rel: str) -> Path:
-    # no absolute paths
-    if rel.startswith("/") or rel.startswith("\\"):
-        raise ValueError(f"absolute path not allowed: {rel}")
-    # normalize and prevent escaping
-    p = (base / rel).resolve()
-    base_r = base.resolve()
-    if p != base_r and not str(p).startswith(str(base_r) + "/"):
-        raise ValueError(f"path escapes base: {rel}")
-    return p
+META_FILE = ".generated_from_run"
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 
-def same_hash(existing: str, plan_sha: str) -> bool:
-    e = (existing or '').strip()
-    p = (plan_sha or '').strip()
-    if not e or not p:
+def sha12(sha: str) -> str:
+    return (sha or "")[:12]
+
+def safe_join(base: Path, rel: str) -> Path:
+    rel = rel.strip().lstrip("./")
+    if rel.startswith("/") or rel.startswith(".."):
+        raise ValueError(f"unsafe path: {rel}")
+    p = (base / rel).resolve()
+    b = base.resolve()
+    if p != b and not str(p).startswith(str(b) + "/"):
+        raise ValueError(f"path escapes base: {rel}")
+    return p
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+def read_meta(dirpath: Path) -> dict:
+    mp = dirpath / META_FILE
+    if not mp.exists():
+        return {}
+    meta = {}
+    for line in read_text(mp).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        meta[k.strip()] = v.strip()
+    return meta
+
+def same_hash(stored: str, plan_sha: str) -> bool:
+    s = (stored or "").strip()
+    p = (plan_sha or "").strip()
+    if not s or not p:
         return False
-    # allow stored prefix (e.g. 12 chars) to match full sha
-    return p.startswith(e) if len(e) < len(p) else (e == p)
+    # allow stored prefix (12 chars) to match full sha
+    return p.startswith(s) if len(s) < len(p) else (s == p)
 
-def alt_name(name: str, plan_sha: str) -> str:
-    # stable, short suffix to avoid collisions
-    return f"{name}__{plan_sha[:12]}"
+def dir_matches_plan(dirpath: Path, name: str, plan_sha: str) -> bool:
+    meta = read_meta(dirpath)
+    stored = (
+        meta.get("plan_sha256")
+        or meta.get("plan_sha")
+        or meta.get("plan_sha256_short")
+        or ""
+    )
+    if same_hash(stored, plan_sha):
+        return True
 
+    # fallback: match by directory name (supports name__sha12 and name__sha12__xxxxxx)
+    suf = f"{name}__{sha12(plan_sha)}"
+    return dirpath.name == suf or dirpath.name.startswith(suf + "__")
 
-    return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
+def pick_existing_for_plan(name: str, plan_sha: str) -> Path | None:
+    prefix = f"{name}__{sha12(plan_sha)}"
+    cands = sorted([d for d in GENERATED.glob(prefix + "*") if d.is_dir()])
+    for d in cands:
+        if dir_matches_plan(d, name, plan_sha):
+            return d
+    return None
 
-def write_run_instructions(out_root: Path, name: str, plan: dict, run_dir: Path, plan_sha: str):
+def write_meta(out_root: Path, run_dir: Path, plan_sha: str, plan: dict):
+    meta = [
+        f"created={time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"source_run={run_dir}",
+        f"plan_sha256={plan_sha}",
+        f"plan_sha256_short={sha12(plan_sha)}",
+        f"name={plan.get('name','')}",
+        f"type={plan.get('type','')}",
+        f"schema_version={plan.get('schema_version','')}",
+    ]
+    (out_root / META_FILE).write_text("\n".join(meta) + "\n", encoding="utf-8")
+
+def write_run_instructions(out_root: Path, name: str, run_dir: Path, plan_sha: str, plan: dict):
     lines = []
     lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"Project: {name}")
     lines.append(f"Source run: {run_dir}")
-    lines.append(f"Plan SHA256: {plan_sha}")
+    lines.append(f"Plan sha256: {plan_sha}")
     lines.append("")
-
     lines.append("Recommended (project-local venv):")
     lines.append(f"  cd {out_root}")
     lines.append("  python3 -m venv .venv")
     lines.append("  source .venv/bin/activate")
     lines.append("  python -m pip install -U pip")
     lines.append("  pip install -e .")
-
-    # best-effort default help command
-    pkg_help = None
-    if (out_root / "src" / name / "cli.py").exists():
-        pkg_help = f"python -m {name}.cli --help"
-    elif (out_root / "src" / name / "__main__.py").exists():
-        pkg_help = f"python -m {name} --help"
-
-    if pkg_help:
-        lines.append(f"  {pkg_help}")
-
+    lines.append(f"  python -m {name}.cli --help")
     lines.append("")
     lines.append("Quick test (no venv, may not work if project expects install):")
     lines.append(f"  cd {out_root}")
-    if pkg_help:
-        lines.append(f"  {pkg_help.replace('python ', 'python3 ')}")
-    else:
-        lines.append("  # run a command from the section below")
-
+    lines.append(f"  python3 -m {name}.cli --help")
     lines.append("")
     lines.append("Plan run.commands (model-provided):")
-    cmds = (plan.get("run") or {}).get("commands") or []
+    cmds = plan.get("run", {}).get("commands", [])
     for c in cmds:
         lines.append(f"  {c}")
-
     (out_root / "RUN_INSTRUCTIONS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", default=None, help="artifacts/runs/run_*/ (default: LATEST)")
-    ap.add_argument("--force", action="store_true", help="overwrite if generated folder exists")
+    ap.add_argument("--force", action="store_true", help="overwrite destination if exists")
     args = ap.parse_args()
+
+    GENERATED.mkdir(parents=True, exist_ok=True)
 
     run_dir = Path(args.run_dir) if args.run_dir else Path((RUNS_DIR / "LATEST").read_text(encoding="utf-8").strip())
     plan_path = run_dir / "plan.json"
     if not plan_path.exists():
         raise SystemExit(f"plan.json not found in {run_dir}")
 
-    plan_txt = plan_path.read_text(encoding="utf-8")
-    plan = json.loads(plan_txt)
+    raw = read_text(plan_path)
+    plan_sha = sha256_text(raw)
+    plan = json.loads(raw)
 
-    name = plan.get("name")
-    if not isinstance(name, str) or not name:
-        raise SystemExit("[fail] plan.name missing/invalid")
+    name = plan["name"]
+    base = GENERATED / name
 
-    out_root = GENERATED / name
+    # 0) If already generated for this plan hash (any matching dir), reuse it
+    existing = pick_existing_for_plan(name, plan_sha)
+    if existing and not args.force:
+        print(f"[ok] already generated (same plan hash): {existing}")
+        print(f"[run] recommended:")
+        print(f"  cd {existing} && cat RUN_INSTRUCTIONS.txt")
+        return
 
-    plan_sha = sha256_text(plan_txt)
-
-    # If folder exists:
-    if out_root.exists():
-        sha_path = out_root / ".generated_from_plan_sha256"
-        existing_sha = sha_path.read_text(encoding="utf-8", errors="ignore").strip() if sha_path.exists() else ""
-
-        # Idempotent: same plan hash => OK (do not fail)
-        if existing_sha and same_hash(existing_sha, plan_sha) and not args.force:
-            print(f"[ok] already generated (same plan hash): {out_root}")
-            print(f"[hint] see: {out_root}/RUN_INSTRUCTIONS.txt")
-            return 0
-
+    # 1) decide target dir
+    target = base
+    if target.exists():
+        if dir_matches_plan(target, name, plan_sha) and not args.force:
+            print(f"[ok] already generated (same plan hash): {target}")
+            print(f"[run] recommended:")
+            print(f"  cd {target} && cat RUN_INSTRUCTIONS.txt")
+            return
         if args.force:
-            shutil.rmtree(out_root)
+            shutil.rmtree(target)
         else:
-            # auto-rename on hash mismatch (or missing sha metadata)
-            base = name.split("__", 1)[0]
-            cand = GENERATED / alt_name(base, plan_sha)
+            target = GENERATED / f"{name}__{sha12(plan_sha)}"
 
-            # if candidate exists and matches => OK
-            if cand.exists():
-                sha2p = cand / ".generated_from_plan_sha256"
-                sha2 = sha2p.read_text(encoding="utf-8", errors="ignore").strip() if sha2p.exists() else ""
-                if sha2 and sha2 == plan_sha:
-                    print(f"[ok] already generated (same plan hash): {cand}")
-                    print(f"[hint] see: {cand}/RUN_INSTRUCTIONS.txt")
-                    return 0
-                # collision: add a short random suffix
-                cand = GENERATED / f"{alt_name(base, plan_sha)}__{uuid.uuid4().hex[:6]}"
+    # 2) if alt exists, handle idempotent / conflict
+    if target.exists():
+        if dir_matches_plan(target, name, plan_sha) and not args.force:
+            print(f"[ok] already generated (same plan hash): {target}")
+            print(f"[run] recommended:")
+            print(f"  cd {target} && cat RUN_INSTRUCTIONS.txt")
+            return
+        if args.force:
+            shutil.rmtree(target)
+        else:
+            # collision: add short random suffix
+            target = GENERATED / f"{name}__{sha12(plan_sha)}__{uuid.uuid4().hex[:6]}"
+            if target.exists() and not args.force:
+                raise SystemExit(f"collision: {target} already exists (rerun or use --force)")
 
-            out_root = cand
-            name = out_root.name
-            print(f"[warn] generated folder exists with different plan; using: {out_root}")
+    target.mkdir(parents=True, exist_ok=True)
 
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    # write plan files
-    files = plan.get("files") or []
-    if not isinstance(files, list) or len(files) < 2:
-        raise SystemExit("[fail] plan.files missing/invalid")
-
+    # 3) write files from plan
+    files = plan.get("files", [])
     for f in files:
-        if not isinstance(f, dict) or "path" not in f or "content" not in f:
-            raise SystemExit("[fail] invalid file entry in plan.files")
         rel = f["path"]
         content = f["content"]
-        if not isinstance(rel, str) or not isinstance(content, str):
-            raise SystemExit("[fail] file.path/content must be strings")
-        target = safe_join(out_root, rel)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content if content.endswith("\n") else (content + "\n"), encoding="utf-8")
+        outp = safe_join(target, rel)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        outp.write_text(content, encoding="utf-8")
 
-    # write instructions + metadata
-    write_run_instructions(out_root, name, plan, run_dir, plan_sha)
+    write_meta(target, run_dir, plan_sha, plan)
+    write_run_instructions(target, name, run_dir, plan_sha, plan)
 
-    meta = {
-        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "source_run": str(run_dir),
-        "plan_sha256": plan_sha,
-        "name": name,
-        "schema_version": plan.get("schema_version", None),
-    }
-    (out_root / ".generated_from_run").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-
-    # minimal README (optional, keep existing if provided by plan)
-    readme = out_root / "README.md"
-    if not readme.exists():
-        readme.write_text(f"# {name}\n\nGenerated by ai-platform scaffold.\n", encoding="utf-8")
-
-    print(f"[ok] generated at: {out_root}")
+    print(f"[ok] generated at: {target}")
     print("[run] recommended:")
-    print(f"  cd {out_root} && python3 -m {name}.cli --help" if (out_root / "src" / name / "cli.py").exists()
-          else f"  cd {out_root} && cat RUN_INSTRUCTIONS.txt")
-
-    cmds = (plan.get("run") or {}).get("commands") or []
+    print(f"  cd {target} && cat RUN_INSTRUCTIONS.txt")
+    cmds = plan.get("run", {}).get("commands", [])
     if cmds:
         print("[run] commands:")
         for c in cmds:
