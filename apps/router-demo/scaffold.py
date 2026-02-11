@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse, json, time, hashlib, shutil
 from pathlib import Path
+import uuid
+import shutil
 
 ROOT = Path("/home/suxiaocong/ai-platform")
 GENERATED = ROOT / "apps" / "generated"
@@ -18,6 +20,13 @@ def safe_join(base: Path, rel: str) -> Path:
     return p
 
 def sha256_text(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
+
+def alt_name(name: str, plan_sha: str) -> str:
+    # stable, short suffix to avoid collisions
+    return f"{name}__{plan_sha[:12]}"
+
+
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 
 def write_run_instructions(out_root: Path, name: str, plan: dict, run_dir: Path, plan_sha: str):
@@ -85,21 +94,36 @@ def main():
 
     # If folder exists:
     if out_root.exists():
-        meta_path = out_root / ".generated_from_run"
-        if (not args.force) and meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                old_sha = meta.get("plan_sha256", "")
-                if old_sha == plan_sha:
-                    print(f"[ok] already generated (same plan hash): {out_root}")
-                    print(f"[ok] plan_sha256={plan_sha}")
-                    print(f"[ok] source_run={meta.get('source_run','')}")
-                    return
-            except Exception:
-                pass
-        if not args.force:
-            raise SystemExit(f"generated folder already exists: {out_root} (use --force to overwrite)")
-        shutil.rmtree(out_root)
+        sha_path = out_root / ".generated_from_plan_sha256"
+        existing_sha = sha_path.read_text(encoding="utf-8", errors="ignore").strip() if sha_path.exists() else ""
+
+        # Idempotent: same plan hash => OK (do not fail)
+        if existing_sha and existing_sha == plan_sha and not args.force:
+            print(f"[ok] already generated (same plan hash): {out_root}")
+            print(f"[hint] see: {out_root}/RUN_INSTRUCTIONS.txt")
+            return 0
+
+        if args.force:
+            shutil.rmtree(out_root)
+        else:
+            # auto-rename on hash mismatch (or missing sha metadata)
+            base = name.split("__", 1)[0]
+            cand = GENERATED / alt_name(base, plan_sha)
+
+            # if candidate exists and matches => OK
+            if cand.exists():
+                sha2p = cand / ".generated_from_plan_sha256"
+                sha2 = sha2p.read_text(encoding="utf-8", errors="ignore").strip() if sha2p.exists() else ""
+                if sha2 and sha2 == plan_sha:
+                    print(f"[ok] already generated (same plan hash): {cand}")
+                    print(f"[hint] see: {cand}/RUN_INSTRUCTIONS.txt")
+                    return 0
+                # collision: add a short random suffix
+                cand = GENERATED / f"{alt_name(base, plan_sha)}__{uuid.uuid4().hex[:6]}"
+
+            out_root = cand
+            name = out_root.name
+            print(f"[warn] generated folder exists with different plan; using: {out_root}")
 
     out_root.mkdir(parents=True, exist_ok=True)
 
