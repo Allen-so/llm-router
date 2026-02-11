@@ -5,6 +5,7 @@ MODE ?= auto
 TEXT ?= Say ROUTER_OK
 API_BASE ?= http://127.0.0.1:4000
 MODEL ?= default-chat
+FORCE ?= 0
 
 PLAN_TEXT_FILE := artifacts/tmp/plan_input.txt
 
@@ -43,12 +44,11 @@ check: ps ready
 	@echo "[check] curl /v1/models =>"
 	@curl -sS -o /dev/null -w 'HTTP=%{http_code}\n' $(API_BASE)/v1/models || true
 	@echo "[check] ask.sh =>"
-	@./scripts/ask.sh --meta $(MODE) "$(TEXT)" || true
+	./scripts/ask.sh --meta auto "Reply with exactly ROUTER_OK and nothing else." || true
 	@echo "[check] last log =>"
 	@tail -n 1 logs/ask_history.log || true
 
 ask:
-	./scripts/ask.sh --meta $(MODE) "$(TEXT)" || true
 
 doctor:
 	./scripts/doctor.sh
@@ -65,12 +65,7 @@ plan:
 	python3 apps/router-demo/plan.py --text-file "$(PLAN_TEXT_FILE)" --api-base "$(API_BASE)" --model "$(MODEL)"
 
 scaffold:
-	python3 apps/router-demo/scaffold.py
-
-gen:
-	$(MAKE) upready
-	$(MAKE) plan
-	$(MAKE) scaffold
+	python3 apps/router-demo/scaffold.py $(if $(filter 1,$(FORCE)),--force,)
 
 qa:
 	./scripts/qa_all.sh
