@@ -26,6 +26,7 @@ run() {
 }
 
 step "repo sanity"
+must_exist apps/router-demo/schemas/plan.schema.json
 must_exist docker-compose.yml
 must_exist scripts/ask.sh
 must_exist scripts/wait_ready.sh
@@ -43,6 +44,9 @@ find scripts -maxdepth 1 -type f -name '*.sh' -print > /tmp/qa_bash_files.txt
 while IFS= read -r f; do
   if bash -n "$f"; then ok "bash -n $f"; else bad "bash -n $f"; fi
 done < /tmp/qa_bash_files.txt
+
+step "schema json"
+run "python3 -m json.tool apps/router-demo/schemas/plan.schema.json >/dev/null"
 
 step "syntax check (python)"
 python3 -m py_compile apps/router-demo/run.py apps/router-demo/replay.py apps/router-demo/plan.py apps/router-demo/scaffold.py && ok 'python py_compile router-demo' || bad 'python py_compile router-demo'

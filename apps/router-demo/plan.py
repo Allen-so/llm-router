@@ -8,7 +8,34 @@ ROOT = Path("/home/suxiaocong/ai-platform")
 RUNS_DIR = ROOT / "artifacts" / "runs"
 ENV_PATH = ROOT / ".env"
 
+SCHEMA_PATH = ROOT / "apps" / "router-demo" / "schemas" / "plan.schema.json"
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{2,40}$")
+
+def validate_schema_file() -> None:
+    # Lightweight sanity check (no jsonschema dependency)
+    if not SCHEMA_PATH.exists():
+        raise SystemExit(f"[fail] missing schema file: {SCHEMA_PATH}")
+    import json as _json
+    obj = _json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    if not isinstance(obj, dict):
+        raise SystemExit("[fail] schema must be a JSON object")
+
+    req = obj.get("required", [])
+    if not isinstance(req, list) or not set(["schema_version","name","type","description","files","run"]).issubset(set(req)):
+        raise SystemExit("[fail] schema.required missing keys")
+
+    props = obj.get("properties", {})
+    if not isinstance(props, dict):
+        raise SystemExit("[fail] schema.properties missing")
+
+    sv = (props.get("schema_version") or {})
+    if not isinstance(sv, dict) or sv.get("const") != 1:
+        raise SystemExit("[fail] schema_version must have const=1")
+
+    # Optional: keep schema aligned with plan.py expectations
+    if props.get("type", {}).get("enum") != ["python-cli"]:
+        raise SystemExit("[fail] schema type enum must be ['python-cli']")
+
 
 def load_master_key() -> str:
     mk = os.environ.get("LITELLM_MASTER_KEY", "").strip()
@@ -186,6 +213,7 @@ def build_system_prompt() -> str:
     )
 
 def main():
+    validate_schema_file()
     ap = argparse.ArgumentParser()
     ap.add_argument("--api-base", default="http://127.0.0.1:4000")
     ap.add_argument("--model", default="default-chat")
