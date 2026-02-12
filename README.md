@@ -1,7 +1,7 @@
 # ai-platform
 
 Local LiteLLM router + generator workbench (V2).  
-Expose a single OpenAI-compatible API across providers, plus a reproducible “plan → scaffold → verify” pipeline.
+Expose a single OpenAI-compatible API across providers, plus a reproducible **plan → scaffold → verify** pipeline.
 
 - Base URL: `http://127.0.0.1:4000/v1`
 - Auth: `Authorization: Bearer $LITELLM_MASTER_KEY`
@@ -10,10 +10,10 @@ Expose a single OpenAI-compatible API across providers, plus a reproducible “p
 ## What you get
 
 - **Router**: one API, multiple model aliases
-- **Generators**:
-  - Python CLI generator: `plan → scaffold → generated_smoke`
-  - Next.js generator: `plan_web → scaffold_web → verify_generated_web`
-- **QA**: `make qa` as the single acceptance gate
+- **Generators**
+  - **Python CLI generator**: `plan → scaffold → verify_generated`
+  - **Next.js generator**: `plan_web → scaffold_web → verify_generated_web`
+- **QA gate**: `make qa` as the single acceptance gate
 - **Run artifacts**: every run persists inputs/outputs/traces under `artifacts/runs/`
 
 ## Model aliases
@@ -29,22 +29,28 @@ Expose a single OpenAI-compatible API across providers, plus a reproducible “p
 - Models: `http://127.0.0.1:4000/v1/models`
 - Chat: `http://127.0.0.1:4000/v1/chat/completions`
 
+<!-- AI-PLATFORM-QUICKSTART-BEGIN -->
+
 ## Quickstart (Makefile)
 
 ### Requirements
 
 - Docker + Docker Compose plugin
 - Bash-compatible shell
+- Run commands at the repo root (where the `Makefile` lives)
 
 ### 30 seconds
+
+1) Configure env:
 
 ```bash
 cp .env.example .env
 # edit .env
+Bring up router + basic checks:
 
 make upready
 make check
-Expected:
+Expected (high level):
 
 /v1/models => HTTP=401 means router is alive (auth required; expected)
 
@@ -59,7 +65,7 @@ make demo TEXT='Reply with exactly ROUTER_OK and nothing else.'
 make replay_latest
 make qa
 make down
-Generate a Python CLI tool (LLM-driven)
+Generator: Python CLI (LLM-driven)
 Plan:
 
 make upready
@@ -78,10 +84,12 @@ apps/generated/<name>/RUN_INSTRUCTIONS.txt
 
 apps/generated/<name>/.generated_from_run
 
-Smoke test:
+Smoke test (generated project install + help):
 
 ./scripts/verify_generated.sh
-Generate a Next.js site (LLM-driven)
+Generator: Next.js site (LLM-driven)
+Generate:
+
 make upready
 make gen_nextjs MODEL=default-chat TEXT='Build a Next.js site named v2-demo. Home and /about. Minimal product style.'
 make meta_latest
@@ -100,6 +108,9 @@ Policy / Retry
 make policy_smoke
 QA / Diagnostics
 make qa
-ls -1t logs/qa_*.log | head
+ls -1t logs/qa_*.log | head -n 5
 ./scripts/doctor.sh
 ./scripts/secrets_scan.sh
+<!-- AI-PLATFORM-QUICKSTART-END -->
+
+---
