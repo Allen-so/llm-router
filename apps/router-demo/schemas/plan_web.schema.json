@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "plan_web.schema.json",
+  "title": "Next.js site plan",
+  "type": "object",
+  "required": ["kind", "name", "title"],
+  "properties": {
+    "kind": { "type": "string", "const": "nextjs_site" },
+    "name": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 40,
+      "pattern": "^[a-z][a-z0-9-]+$"
+    },
+    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "maxLength": 240 },
+    "pages": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["route", "headline"],
+        "properties": {
+          "route": { "type": "string", "pattern": "^/([a-z0-9-]+)?$" },
+          "headline": { "type": "string", "maxLength": 80 },
+          "body": { "type": "string", "maxLength": 1200 }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

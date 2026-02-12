@@ -1,70 +1,54 @@
 # ai-platform
 
-Local LiteLLM router exposing a single OpenAI-compatible API across providers.
+Local LiteLLM router + generator workbench (V2).  
+Expose a single OpenAI-compatible API across providers, plus a reproducible “plan → scaffold → verify” pipeline.
 
 - Base URL: `http://127.0.0.1:4000/v1`
 - Auth: `Authorization: Bearer $LITELLM_MASTER_KEY`
 - Local-only bind: `127.0.0.1:4000`
 
-## Quickstart
+## What you get
 
-```bash
-cp .env.example .env
-nano .env
+- **Router**: one API, multiple model aliases
+- **Generators**:
+  - Python CLI generator: `plan → scaffold → generated_smoke`
+  - Next.js generator: `plan_web → scaffold_web → verify_generated_web`
+- **QA**: `make qa` as the single acceptance gate
+- **Run artifacts**: every run persists inputs/outputs/traces under `artifacts/runs/`
 
-docker compose up -d
-./scripts/test_router.sh
-./scripts/test_models.sh deepseek-chat kimi-chat default-chat long-chat premium-chat best-effort-chat
+## Model aliases
 
-Model aliases
+- `default-chat` — daily (DeepSeek)
+- `long-chat` — long-form (Kimi)
+- `premium-chat` — strongest (Opus via Anthropic gateway)
+- `best-effort-chat` — escalation allowed (fallback chain enabled)
 
-default-chat — daily (DeepSeek)
+## Endpoints
 
-long-chat — long-form (Kimi; temperature=1 enforced in scripts)
-
-premium-chat — strongest (Opus via Anthropic gateway)
-
-best-effort-chat — escalation allowed
-
-Endpoints
-
-Readiness: http://127.0.0.1:4000/health/readiness
-
-Models: http://127.0.0.1:4000/v1/models
-
-Chat: http://127.0.0.1:4000/v1/chat/completions
-
-Routing policy (Phase 2)
-
-No auto-escalation on default-chat
-
-Context overflow: default-chat → long-chat
-
-Escalation only on best-effort-chat: best-effort-chat → long-chat → premium-chat
-
-Notes
-
-Run scripts inside WSL bash (Ubuntu), not Windows CMD/PowerShell.
-
-<!-- AI-PLATFORM-QUICKSTART-BEGIN -->
+- Readiness: `http://127.0.0.1:4000/health/readiness`
+- Models: `http://127.0.0.1:4000/v1/models`
+- Chat: `http://127.0.0.1:4000/v1/chat/completions`
 
 ## Quickstart (Makefile)
 
 ### Requirements
+
 - Docker + Docker Compose plugin
-- Linux shell (WSL2 OK)
+- Bash-compatible shell
 
 ### 30 seconds
+
 ```bash
-cd /home/suxiaocong/ai-platform
+cp .env.example .env
+# edit .env
+
 make upready
 make check
-
 Expected:
 
 /v1/models => HTTP=401 means router is alive (auth required; expected)
 
-ROUTER_OK means ask path works
+ROUTER_OK means the ask path works
 
 Common targets
 make help
@@ -75,13 +59,16 @@ make demo TEXT='Reply with exactly ROUTER_OK and nothing else.'
 make replay_latest
 make qa
 make down
+Generate a Python CLI tool (LLM-driven)
+Plan:
 
-Generate a Python CLI tool (plan → scaffold)
 make upready
 make plan MODEL=default-chat TEXT='Build a minimal python CLI tool named plancheck. It supports --help and prints parsed args.'
-make scaffold
+Scaffold:
 
-Atomic (upready + plan + scaffold):
+make scaffold
+Atomic (plan + scaffold):
+
 make gen TEXT='Build a python CLI tool that batch renames files in a folder. Features: dry-run, regex replace, suffix/prefix add. Name it "renamekit".'
 Outputs:
 
@@ -91,13 +78,28 @@ apps/generated/<name>/RUN_INSTRUCTIONS.txt
 
 apps/generated/<name>/.generated_from_run
 
+Smoke test:
+
+./scripts/verify_generated.sh
+Generate a Next.js site (LLM-driven)
+make upready
+make gen_nextjs MODEL=default-chat TEXT='Build a Next.js site named v2-demo. Home and /about. Minimal product style.'
+make meta_latest
+make runs_summary
+Inspect latest run:
+
+RUN_DIR="$(cat artifacts/runs/LATEST)"
+ls -la "$RUN_DIR"
+cat "$RUN_DIR/policy.decision.json"
+cat "$RUN_DIR/policy.trace.json"
+tail -n 50 "$RUN_DIR/events.jsonl"
+Verify the generated web build:
+
+./scripts/verify_generated_web.sh
+Policy / Retry
+make policy_smoke
 QA / Diagnostics
 make qa
 ls -1t logs/qa_*.log | head
 ./scripts/doctor.sh
 ./scripts/secrets_scan.sh
-
-<!-- AI-PLATFORM-QUICKSTART-END -->
-
-
-

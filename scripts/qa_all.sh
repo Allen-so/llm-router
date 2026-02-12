@@ -1,95 +1,209 @@
 #!/usr/bin/env bash
 set -u
+set -o pipefail
 
-ROOT="/home/suxiaocong/ai-platform"
-cd "$ROOT" || exit 2
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/load_node.sh" || true
+cd "$ROOT" || exit 1
 
-ts="$(date +%Y%m%d_%H%M%S)"
 mkdir -p logs
-log="logs/qa_${ts}.log"
-exec > >(tee "$log") 2>&1
-echo "[qa] log=$log"
 
-fail=0
-step() { echo; echo "== $* =="; }
-ok()   { echo "[ok] $*"; }
-bad()  { echo "[fail] $*"; fail=$((fail+1)); }
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="${QA_LOG:-logs/qa_${TS}.log}"
 
-must_exist() {
-  [[ -e "$1" ]] && ok "exists: $1" || bad "missing: $1"
+# tee all output to log
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "[qa] start: $(date)"
+echo "[qa] root:  $ROOT"
+if command -v git >/dev/null 2>&1; then
+  echo "[qa] git:   $(git rev-parse --short HEAD 2>/dev/null || echo NA)"
+fi
+echo "[qa] log:   $LOG_FILE"
+echo
+
+FAILS=()
+SKIPS=()
+
+hint() {
+  case "$1" in
+    repo_sanity)
+      echo "  hint: missing key files. make sure you are in repo root and pulled latest changes."
+      ;;
+    bash_syntax)
+      echo "  hint: a shell script has syntax errors. run: bash -n scripts/<file>.sh"
+      ;;
+    python_syntax)
+      echo "  hint: a python file fails compile. run: python3 -m py_compile <file.py>"
+      ;;
+    secrets_scan)
+      echo "  hint: secrets detected. remove leaked keys, rotate them, and re-run."
+      ;;
+    docker_upready)
+      echo "  hint: Docker not available in WSL. enable Docker Desktop WSL integration, then run: docker version"
+      ;;
+    models_endpoint)
+      echo "  hint: router not listening on 127.0.0.1:4000 or port is blocked. check: docker compose ps"
+      ;;
+    strict_check)
+      echo "  hint: master key missing or model alias wrong. verify .env LITELLM_MASTER_KEY and litellm config."
+      ;;
+    demo_replay)
+      echo "  hint: router-demo cannot replay. verify artifacts/runs/LATEST exists and .env is readable."
+      ;;
+    plan_scaffold)
+      echo "  hint: model output not valid json or schema mismatch. check apps/router-demo/plan.py logs in artifacts."
+      ;;
+    down_negative)
+      echo "  hint: docker compose down did not stop the router, or another service occupies port 4000."
+      ;;
+    *)
+      echo "  hint: check the log above for the failing command."
+      ;;
+  esac
 }
 
-run() {
-  echo "+ $*"
-  bash -lc "$*" || { bad "command failed: $*"; return 1; }
+run_step() {
+  local name="$1"; shift
+  echo "==> [step] $name"
+  "$@"
+  local rc=$?
+  if [ $rc -ne 0 ]; then
+    echo "[fail] step=$name rc=$rc"
+    hint "$name"
+    FAILS+=("$name")
+    echo
+    return $rc
+  fi
+  echo "[ok] step=$name"
+  echo
   return 0
 }
 
-step "repo sanity"
-must_exist apps/router-demo/schemas/plan.schema.json
-must_exist docker-compose.yml
-must_exist scripts/ask.sh
-must_exist scripts/wait_ready.sh
-must_exist scripts/lib_http_retry.sh
-must_exist scripts/secrets_scan.sh
-must_exist apps/router-demo/run.py
-must_exist apps/router-demo/replay.py
-must_exist apps/router-demo/plan.py
-must_exist apps/router-demo/scaffold.py
-must_exist logs
+skip_step() {
+  local name="$1"; shift
+  echo "==> [skip] $name"
+  echo "  reason: $*"
+  SKIPS+=("$name")
+  echo
+}
 
-step "syntax check (bash)"
-rm -f /tmp/qa_bash_files.txt
-find scripts -maxdepth 1 -type f -name '*.sh' -print > /tmp/qa_bash_files.txt
-while IFS= read -r f; do
-  if bash -n "$f"; then ok "bash -n $f"; else bad "bash -n $f"; fi
-done < /tmp/qa_bash_files.txt
+# 1 repo sanity
+run_step repo_sanity bash -lc '
+  test -f docker-compose.yml
+  test -f Makefile
+  test -d scripts
+  test -f scripts/wait_ready.sh
+  test -f scripts/qa_all.sh
+  test -d apps/router-demo
+  test -f apps/router-demo/plan.py
+  test -f apps/router-demo/scaffold.py
+' || true
 
-step "schema json"
-run "python3 -m json.tool apps/router-demo/schemas/plan.schema.json >/dev/null"
+# 2 bash syntax
+run_step bash_syntax bash -lc '
+  shopt -s nullglob
+  files=(scripts/*.sh)
+  test ${#files[@]} -gt 0
+  for f in "${files[@]}"; do bash -n "$f"; done
+' || true
 
-step "syntax check (python)"
-python3 -m py_compile apps/router-demo/run.py apps/router-demo/replay.py apps/router-demo/plan.py apps/router-demo/scaffold.py && ok 'python py_compile router-demo' || bad 'python py_compile router-demo'
+# 3 python syntax
+run_step python_syntax bash -lc '
+  python3 - <<PY
+import sys, pathlib, py_compile
+root = pathlib.Path("apps/router-demo")
+files = list(root.rglob("*.py"))
+if not files:
+  print("no python files under apps/router-demo")
+  sys.exit(1)
+for f in files:
+  py_compile.compile(str(f), doraise=True)
+print(f"compiled {len(files)} files")
+PY
+' || true
 
-step "secrets scan"
-run './scripts/secrets_scan.sh' || true
+# 4 secrets scan
+run_step secrets_scan bash -lc './scripts/secrets_scan.sh' || true
 
-step "up + ready"
-run 'docker compose up -d' || true
-run './scripts/wait_ready.sh' || true
-run 'docker compose ps' || true
-run "curl -sS -o /dev/null -w 'HTTP=%{http_code}\\n' http://127.0.0.1:4000/v1/models || true" || true
+# 5 up + ready
+DOCKER_OK=1
+run_step docker_upready bash -lc '
+  docker compose up -d
+  ./scripts/wait_ready.sh
+  docker compose ps
+' || DOCKER_OK=0
 
-step "ask (positive path)"
-out="$(./scripts/ask.sh --meta auto 'Say ROUTER_OK' 2>/dev/null || true)"
-echo "$out"
-if echo "$out" | grep -q 'ROUTER_OK'; then ok 'ask returned ROUTER_OK'; else bad 'ask did not return ROUTER_OK'; fi
-tail -n 1 logs/ask_history.log 2>/dev/null || true
-
-step "demo + replay_latest"
-run "make demo MODE=auto TEXT='Reply with exactly ROUTER_OK and nothing else.'" || true
-out2="$(make replay_latest 2>/dev/null || true)"
-echo "$out2"
-if echo "$out2" | grep -q 'ROUTER_OK'; then ok 'replay_latest returned ROUTER_OK'; else bad 'replay_latest did not return ROUTER_OK'; fi
-
-step "plan + scaffold"
-run "make plan MODEL=default-chat TEXT='Build a minimal python CLI tool named qarenamer. It prints parsed args and supports --help.'" || true
-run 'python3 apps/router-demo/scaffold.py --force' || true
-if [[ -d apps/generated/qarenamer ]]; then ok 'generated app exists: apps/generated/qarenamer'; else bad 'generated app missing'; fi
-if [[ -f apps/generated/qarenamer/RUN_INSTRUCTIONS.txt ]]; then ok 'RUN_INSTRUCTIONS.txt exists'; else bad 'RUN_INSTRUCTIONS.txt missing'; fi
-
-step "down + ask (negative path should be diagnosable)"
-run 'docker compose down' || true
-meta="$(./scripts/ask.sh --meta auto 'Say ROUTER_OK' 2>/dev/null | tail -n 1 || true)"
-echo "$meta"
-if echo "$meta" | grep -q 'rc=000'; then ok 'down path shows rc=000 (expected)'; else bad 'down path did not show rc=000'; fi
-tail -n 1 logs/ask_history.log 2>/dev/null || true
-
-echo
-if [[ $fail -eq 0 ]]; then
-  echo 'QA RESULT: PASS'
-  exit 0
+# 6 models endpoint
+if [ $DOCKER_OK -eq 1 ]; then
+  run_step models_endpoint bash -lc '
+    code="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4000/v1/models || true)"
+    echo "[info] /v1/models http_code=$code"
+    test "$code" = "401" -o "$code" = "200"
+  ' || true
 else
-  echo "QA RESULT: FAIL ($fail failures)"
-  exit 1
+  skip_step models_endpoint "docker not ready"
 fi
+
+# 7 strict ask gate
+if [ $DOCKER_OK -eq 1 ]; then
+  run_step strict_check bash -lc 'make check' || true
+else
+  skip_step strict_check "docker not ready"
+fi
+
+# 8 demo + replay
+if [ $DOCKER_OK -eq 1 ]; then
+  run_step demo_replay bash -lc '
+    make demo MODE=auto TEXT="Reply with exactly ROUTER_OK and nothing else."
+    make replay_latest
+  ' || true
+else
+  skip_step demo_replay "docker not ready"
+fi
+
+# 9 plan + scaffold
+if [ $DOCKER_OK -eq 1 ]; then
+  if run_step plan_scaffold bash -lc '
+    make plan MODEL=default-chat TEXT="Build a minimal python CLI tool named plancheck. It supports --help and prints parsed args."
+    make scaffold
+  '; then
+    run_step generated_smoke bash -lc 'make verify_generated'
+  fi
+else
+  skip_step plan_scaffold "docker not ready"
+  skip_step generated_smoke "docker not ready"
+fi
+
+# 9c web scaffold smoke (deterministic)
+if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  run_step web_smoke bash -lc 'make web_smoke'
+else
+  skip_step web_smoke "node/npm not installed"
+fi
+
+# 10 down + negative check
+run_step down_negative bash -lc '
+  docker compose down
+  code="$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4000/v1/models || true)"
+  echo "[info] /v1/models after down http_code=$code"
+  test "$code" = "000"
+' || true
+
+echo "===================="
+echo "[qa] summary"
+echo "[qa] log: $LOG_FILE"
+if [ ${#FAILS[@]} -eq 0 ]; then
+  echo "[qa] result: PASS"
+else
+  echo "[qa] result: FAIL"
+  echo "[qa] failed steps:"
+  for s in "${FAILS[@]}"; do echo "  - $s"; done
+fi
+if [ ${#SKIPS[@]} -gt 0 ]; then
+  echo "[qa] skipped steps:"
+  for s in "${SKIPS[@]}"; do echo "  - $s"; done
+fi
+echo "===================="
+
+[ ${#FAILS[@]} -eq 0 ]
