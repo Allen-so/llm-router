@@ -12,27 +12,14 @@ PLAN_TEXT_FILE := artifacts/tmp/plan_input.txt
 .PHONY: help up ready upready down ps logs check ask doctor demo replay_latest plan scaffold gen qa
 
 help:
-	@echo "Targets:"
-	@echo "  make upready                         - up + wait_ready"
-	@echo "  make check                           - ps + curl models + ask"
-	@echo "  make demo MODE=auto TEXT='...'       - demo run (text)"
-	@echo "  make replay_latest                   - replay last demo run"
-	@echo "  make plan MODEL=default-chat TEXT='...'   - generate plan.json (JSON-only, auto-retry)"
-	@echo "  make scaffold                        - scaffold from LATEST plan.json"
-	@echo "  make gen TEXT='...'                  - upready + plan + scaffold (atomic)"
-	@echo "  make doctor                          - repo + env + port checks"
-	@echo "  make qa                              - global QA"
 
 up:
-	docker compose up -d
 
 ready:
-	./scripts/wait_ready.sh
 
 upready: up ready
 
 down:
-	docker compose down
 
 ps:
 	docker compose ps
@@ -112,13 +99,14 @@ scaffold_web:
 verify_generated_web:
 	./scripts/run_step_log.sh verify_generated_web -- ./scripts/verify_generated_web.sh
 
-gen_nextjs:
+gen_nextjs: upready
 	@$(MAKE) plan_web MODEL="$(MODEL)" TEXT="$(TEXT)"
 	@$(MAKE) scaffold_web
 	./scripts/run_step_log.sh apply_plan_web -- python3 apps/router-demo/apply_plan_web.py
 	@$(MAKE) verify_generated_web
 
-	@$(MAKE) meta_latest
+
+	@$(MAKE) post_run
 meta_latest:
 	./scripts/run_step_log.sh meta_latest -- python3 scripts/write_run_meta.py --append-events
 
@@ -134,5 +122,25 @@ web_replay_latest:
 
 
 .PHONY: web_smoke
-web_smoke:
+web_smoke: upready
 	bash scripts/web_smoke.sh
+	@$(MAKE) post_run
+
+
+	KEEP=3 bash scripts/retain_keep3.sh
+
+
+	KEEP=3 bash scripts/retain_keep3.sh
+
+
+	@$(MAKE) meta_latest
+	@$(MAKE) prune_keep3
+
+.PHONY: prune_keep3
+prune_keep3:
+	KEEP=3 bash scripts/retain_keep3.sh
+
+.PHONY: post_run
+post_run:
+	@$(MAKE) meta_latest
+	@$(MAKE) prune_keep3
