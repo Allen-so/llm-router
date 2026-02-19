@@ -126,131 +126,158 @@ TSX
 
 # ---------------- /runs/[id] (server) ----------------
 cat > "$gen_dir/app/runs/[id]/page.tsx" <<'TSX'
-import fs from 'fs';
-import path from 'path';
-import Link from 'next/link';
-import { notFound } from 'next/navigation';
+import path from "path";
+import { promises as fs } from "fs";
+import type { CSSProperties } from "react";
 
-type AnyObj = Record<string, any>;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function readJson(p: string): AnyObj | null {
-  try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return null; }
+type Props = { params: { id: string } };
+
+function Badge({ status }: { status: string }) {
+  const s = (status || "unknown").toLowerCase();
+  const ok = s === "ok";
+  const style: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "4px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    border: "1px solid rgba(0,0,0,0.12)",
+    background: ok ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
+    color: ok ? "rgb(21,128,61)" : "rgb(185,28,28)",
+    marginLeft: 10,
+    verticalAlign: "middle",
+    textTransform: "lowercase",
+  };
+  return <span style={style}>{ok ? "ok" : s}</span>;
 }
 
-function safe(v: any, fb = '-') {
-  if (v === undefined || v === null) return fb;
-  const s = String(v);
-  return s.trim() === '' ? fb : s;
+async function readJson(absPath: string): Promise<any | null> {
+  try {
+    const raw = await fs.readFile(absPath, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
-function Card(props: React.PropsWithChildren<{ title: string; right?: React.ReactNode }>) {
-  return (
-    <div style={{ border:'1px solid rgba(0,0,0,0.08)', background:'rgba(255,255,255,0.72)', borderRadius: 18, padding: 18, marginTop: 14 }}>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', gap: 12 }}>
-        <div style={{ fontWeight: 950, fontSize: 18 }}>{props.title}</div>
-        <div>{props.right}</div>
-      </div>
-      <div style={{ marginTop: 12 }}>{props.children}</div>
-    </div>
-  );
-}
+export default async function RunDetailPage({ params }: Props) {
+  const id = params.id;
 
-export const dynamic = 'force-dynamic';
+  const fileRel = path.join("public", "runs_data", `${id}.json`);
+  const fileAbs = path.join(process.cwd(), fileRel);
+  const detail = await readJson(fileAbs);
 
-export default function RunDetailPage({ params }: { params: { id: string } }) {
-  const root = process.cwd();
-  const id = params?.id ? decodeURIComponent(params.id) : '';
-  if (!id) notFound();
+  if (!detail) {
+    return (
+      <main style={{ maxWidth: 980, margin: "40px auto", padding: "0 16px" }}>
+        <h1 style={{ fontSize: 54, fontWeight: 900, letterSpacing: "-0.02em" }}>
+          Run Report <Badge status="fail" />
+        </h1>
+        <div style={{ opacity: 0.65, marginTop: 8 }}>{id}</div>
+        <div style={{ opacity: 0.55, marginTop: 6 }}>
+          file: <code>{fileRel}</code>
+        </div>
 
-  const strip = id.replace(/^run_/, '');
-
-  const candidates = [
-    path.join(root, 'public', 'runs_data', `run_${id}.json`),
-    path.join(root, 'public', 'runs_data', `${id}.json`),
-    path.join(root, 'public', 'runs_data', `run_${strip}.json`),
-    path.join(root, 'public', 'runs_data', `${strip}.json`),
-  ];
-
-  let data: AnyObj | null = null;
-  let picked: string | null = null;
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      data = readJson(p);
-      picked = p;
-      break;
-    }
+        <section style={{ marginTop: 18, borderRadius: 18, border: "1px solid rgba(0,0,0,0.12)", padding: 18 }}>
+          <b>Data not found</b>
+          <div style={{ marginTop: 8, opacity: 0.7 }}>abs: {fileAbs}</div>
+          <div style={{ marginTop: 12 }}>
+            <a href="/runs" style={{ textDecoration: "underline" }}>Back to runs</a>
+          </div>
+        </section>
+      </main>
+    );
   }
 
-  if (!data) notFound();
+  const index = detail.index ?? {};
+  const meta = detail.meta ?? {};
 
-  const summary = (data.summary ?? data) as AnyObj;
-  const verify = (data.verify ?? data.verify_summary ?? null) as AnyObj | null;
-  const meta = (data.meta ?? null) as AnyObj | null;
-  const events = (data.events_tail ?? data.events ?? null) as any;
+  const status = String(meta.status ?? index.status ?? "unknown");
+  const kind = String(meta.kind ?? index.kind ?? "-");
+  const start = String(index.start ?? meta.ts ?? meta.ts_utc ?? "-");
+  const duration_s = String(meta.duration_s ?? index.duration_s ?? "-");
+  const last_step = String(meta.last_step ?? index.last_step ?? "-");
+  const mode = String(meta.mode ?? index.mode ?? "-");
+  const model = String(meta.model ?? index.model ?? "-");
+  const run_dir = String(meta.run_dir ?? index.run_dir ?? "-");
 
-  const ok = String(summary?.status ?? '').toLowerCase() === 'ok' || Boolean(verify?.ok);
+  const rows: Array<[string, string]> = [
+    ["kind", kind],
+    ["status", status],
+    ["start", start],
+    ["duration_s", duration_s],
+    ["last_step", last_step],
+    ["mode", mode],
+    ["model", model],
+    ["run_dir", run_dir],
+  ];
+
+  const verify = detail.verify ?? null;
 
   return (
-    <main>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', gap: 12, margin:'14px 0' }}>
+    <main style={{ maxWidth: 980, margin: "40px auto", padding: "0 16px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ display:'flex', alignItems:'center', gap: 10 }}>
-            <h1 style={{ fontSize: 52, fontWeight: 950, letterSpacing:'-0.03em', margin: 0 }}>Run Report</h1>
-            <span style={{
-              display:'inline-flex', alignItems:'center',
-              padding:'6px 10px', borderRadius: 999, fontWeight: 950, fontSize: 12,
-              background: ok ? 'rgba(52,199,89,0.15)' : 'rgba(255,59,48,0.12)',
-              border: `1px solid ${ok ? 'rgba(52,199,89,0.28)' : 'rgba(255,59,48,0.22)'}`,
-            }}>
-              {ok ? 'ok' : 'fail'}
-            </span>
-          </div>
-          <div style={{ marginTop: 10, color:'rgba(0,0,0,0.55)' }}>{id}</div>
-          <div style={{ marginTop: 6, color:'rgba(0,0,0,0.45)', fontSize: 12 }}>
-            file: <code style={{ fontWeight: 900 }}>{picked?.split('/').slice(-3).join('/')}</code>
+          <h1 style={{ fontSize: 54, fontWeight: 900, letterSpacing: "-0.02em" }}>
+            Run Report <Badge status={status} />
+          </h1>
+          <div style={{ opacity: 0.65, marginTop: 8 }}>{id}</div>
+          <div style={{ opacity: 0.55, marginTop: 6 }}>
+            file: <code>public/runs_data/{id}.json</code>
           </div>
         </div>
 
-        <div style={{ display:'flex', gap: 10 }}>
-          <Link href="/runs" style={{ textDecoration:'none', fontWeight: 950, padding:'10px 14px', borderRadius: 999, border:'1px solid rgba(0,0,0,0.08)', background:'white' }}>
-            Back
-          </Link>
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+          <a href="/runs" style={{ padding: "10px 16px", borderRadius: 999, border: "1px solid rgba(0,0,0,0.12)" }}>Back</a>
+          <a
+            href={`/runs/${id}?t=${Date.now()}`}
+            style={{ padding: "10px 16px", borderRadius: 999, border: "1px solid rgba(0,0,0,0.12)" }}
+          >
+            Refresh
+          </a>
         </div>
       </div>
 
-      <Card title="Summary">
-        {['kind','status','start','duration_s','last_step','mode','model','run_dir'].map((k) => (
-          <div key={k} style={{ display:'flex', justifyContent:'space-between', gap: 12, padding:'8px 0', borderBottom:'1px solid rgba(0,0,0,0.06)' }}>
-            <div style={{ color:'rgba(0,0,0,0.55)', fontWeight: 850 }}>{k}</div>
-            <div style={{ fontWeight: 900, maxWidth:'70%', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{safe(summary?.[k])}</div>
-          </div>
-        ))}
-      </Card>
+      <section style={{ marginTop: 18, borderRadius: 18, border: "1px solid rgba(0,0,0,0.12)", padding: 18 }}>
+        <h2 style={{ fontSize: 18, fontWeight: 800 }}>Summary</h2>
+        <div style={{ marginTop: 12 }}>
+          {rows.map(([k, v]) => (
+            <div
+              key={k}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                padding: "10px 0",
+                borderTop: "1px solid rgba(0,0,0,0.06)",
+              }}
+            >
+              <div style={{ opacity: 0.7, fontWeight: 700 }}>{k}</div>
+              <div style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </section>
 
-      <Card title="Verify" right={verify?.ok !== undefined ? <span style={{ fontWeight: 950 }}>{String(verify.ok)}</span> : null}>
-        <pre style={{ margin: 0, whiteSpace:'pre-wrap', fontSize: 12 }}>
-          {verify ? JSON.stringify(verify, null, 2) : 'No verify payload.'}
+      <section style={{ marginTop: 18, borderRadius: 18, border: "1px solid rgba(0,0,0,0.12)", padding: 18 }}>
+        <h2 style={{ fontSize: 18, fontWeight: 800 }}>Verify</h2>
+        {verify ? (
+          <pre style={{ marginTop: 12, padding: 12, borderRadius: 12, background: "rgba(0,0,0,0.04)", overflow: "auto" }}>
+{JSON.stringify(verify, null, 2)}
+          </pre>
+        ) : (
+          <div style={{ marginTop: 10, opacity: 0.7 }}>No verify payload.</div>
+        )}
+      </section>
+
+      <details style={{ marginTop: 18 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 800 }}>Raw JSON</summary>
+        <pre style={{ marginTop: 12, padding: 12, borderRadius: 12, background: "rgba(0,0,0,0.04)", overflow: "auto" }}>
+{JSON.stringify(detail, null, 2)}
         </pre>
-      </Card>
-
-      <Card title="Meta">
-        <pre style={{ margin: 0, whiteSpace:'pre-wrap', fontSize: 12 }}>
-          {meta ? JSON.stringify(meta, null, 2) : 'No meta payload.'}
-        </pre>
-      </Card>
-
-      <Card title="Events Tail">
-        <pre style={{ margin: 0, whiteSpace:'pre-wrap', fontSize: 12 }}>
-          {events ? (typeof events === 'string' ? events : JSON.stringify(events, null, 2)) : 'No events captured.'}
-        </pre>
-      </Card>
-
-      <details style={{ marginTop: 14 }}>
-        <summary style={{ fontWeight: 950, cursor:'pointer' }}>Full payload (Raw)</summary>
-        <pre style={{ marginTop: 10, whiteSpace:'pre-wrap', fontSize: 12 }}>{JSON.stringify(data, null, 2)}</pre>
       </details>
-
-      <div style={{ marginTop: 26, color:'rgba(0,0,0,0.45)', fontSize: 12 }}>Built with Next.js</div>
     </main>
   );
 }
