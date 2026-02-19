@@ -153,5 +153,4 @@ sanity_keep3:
 
 .PHONY: web_smoke_open
 web_smoke_open:
-	@$(MAKE) web_smoke
 	@bash scripts/web_smoke_open.sh
