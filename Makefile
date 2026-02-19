@@ -144,3 +144,14 @@ prune_keep3:
 post_run:
 	@$(MAKE) meta_latest
 	@$(MAKE) prune_keep3
+
+.PHONY: sanity_keep3
+sanity_keep3:
+	@echo "[sanity] generated dirs:"; ls -1dt apps/generated/*__* 2>/dev/null | head -n 20 || true
+	@echo "[sanity] runs dirs:"; ls -1dt artifacts/runs/run_* 2>/dev/null | head -n 20 || true
+	@echo "[sanity] LATEST:"; cat artifacts/runs/LATEST 2>/dev/null || true
+
+.PHONY: web_smoke_open
+web_smoke_open:
+	@$(MAKE) web_smoke
+	@bash scripts/web_smoke_open.sh
