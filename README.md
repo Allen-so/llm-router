@@ -8,53 +8,61 @@
   <img alt="node" src="https://img.shields.io/badge/Node-20%2B-black">
 </p>
 
-Reproducible **LLM routing + generation workbench** built on **Docker + LiteLLM**.  
-It exposes a **local OpenAI-compatible API** and includes a **QA-gated workflow** (plan → scaffold → verify) plus a deterministic **Next.js web_smoke** gate.
+Reproducible LLM routing + generation workbench built on Docker + LiteLLM.  
+Expose a local OpenAI-compatible API and ship QA-gated workflows (plan → scaffold → verify) + deterministic web_smoke.
 
 ---
 
 ## Architecture
 
+> IMPORTANT: The mermaid block must start at column 1, and the closing ``` must be on its own line.
+
 ```mermaid
 flowchart LR
-  U["Client / Scripts"] -->|OpenAI-compatible| R["LiteLLM Router<br/>127.0.0.1:4000/v1"]
+  Client["Client / Scripts"]
+  Router["LiteLLM Router — 127.0.0.1:4000/v1"]
 
-  R --> DS["DeepSeek"]
-  R --> OA["OpenAI"]
-  R --> OT["Other providers"]
+  DS["DeepSeek"]
+  OA["OpenAI"]
+  OT["Other providers"]
 
-  subgraph W["Workbench"]
+  Client --> Router
+  Router --> DS
+  Router --> OA
+  Router --> OT
+
+  subgraph Workbench
     QA["make qa"]
     GEN["plan -> scaffold -> verify"]
     WEB["web_smoke -> next build"]
     ART["artifacts/runs + logs"]
   end
 
-  R --> QA
-  R --> GEN
-  R --> WEB
-  R --> ART
+  Router --> QA
+  Router --> GEN
+  Router --> WEB
+  Router --> ART
 What you get
 
 OpenAI-compatible endpoint: http://127.0.0.1:4000/v1
 
-Single auth gate via LITELLM_MASTER_KEY (Bearer)
+Single auth gate: Authorization: Bearer $LITELLM_MASTER_KEY
 
-Provider routing (DeepSeek / OpenAI / others) behind one API
+Provider routing behind one API: DeepSeek / OpenAI / others
 
-Reproducible workbench
+Workbench flows
 
 QA: make qa
 
-Generator: plan -> scaffold -> verify
+Generator: plan → scaffold → verify
 
 Web smoke: deterministic Next.js scaffold + next build
 
-Artifacts & logs
+Artifacts and logs
 
-artifacts/runs/ stores run payloads + replay outputs
+artifacts/runs/ stores run payloads and replay outputs
 
-logs/ stores QA logs (repo only keeps .gitkeep)
+logs/ stores QA logs (repo keeps .gitkeep only)
 
 Quickstart
 Prerequisites
@@ -63,34 +71,31 @@ Docker + Docker Compose
 
 Python 3
 
-Node + npm (only required for web_smoke)
+Node + npm (only for web_smoke)
 
-1) Create .env (DO NOT COMMIT)
+Create .env (DO NOT COMMIT)
 cd ~/ai-platform || exit 1
 
 cat > .env <<'EOF'
-# Router auth (your local gate key - generate a strong random string)
 LITELLM_MASTER_KEY=CHANGE_ME_LONG_RANDOM
-
-# Provider keys (fill what you actually use)
 DEEPSEEK_API_KEY=CHANGE_ME
 # OPENAI_API_KEY=CHANGE_ME
 EOF
 
-# sanity: .env must be ignored
 git check-ignore -v .env
-2) Run QA (demo-safe, no real network/provider calls)
+Run QA (demo-safe)
 make qa
-3) Run QA (full mode, requires working provider keys)
+Run QA (full mode, requires real keys)
 QA_NET=1 make qa
 Useful commands
-Start / Stop router
+Start router
 docker compose up -d
+Stop router
 docker compose down
-Check router is reachable (expects 401 without auth)
+Check router without auth (expect 401)
 curl -s -o /dev/null -w "models_no_auth=%{http_code}\n" \
   http://127.0.0.1:4000/v1/models
-Check router with auth (expects 200)
+Check router with auth (expect 200)
 set -a; source .env; set +a
 
 curl -s -o /dev/null -w "models_with_auth=%{http_code}\n" \
@@ -100,19 +105,19 @@ E2E websmoke
 RUN_QA=1 KEEP_SERVER=0 bash scripts/e2e_websmoke_test.sh
 Repo layout
 
-infra/litellm/config.yaml — LiteLLM router config (models/providers/rules)
+infra/litellm/config.yaml — LiteLLM router config
 
 docker-compose.yml — local router runtime
 
 scripts/ — QA + smoke + helper scripts
 
-apps/router-demo/ — minimal demo client + replay tooling
+apps/router-demo/ — demo client + replay tooling
 
 apps/generated/ — generated outputs (kept small by retention)
 
 artifacts/runs/ — run logs + replay payloads
 
-logs/ — QA logs (content ignored; keep .gitkeep)
+logs/ — QA logs (.gitkeep tracked)
 
 Security notes
 
@@ -120,41 +125,20 @@ Security notes
 
 .env.example must contain placeholders only.
 
-If GitHub shows Secret scanning alerts, treat those secrets as compromised:
+If GitHub Secret scanning alerts exist, treat those keys as compromised:
 
-revoke/rotate the key on the provider side
+revoke/rotate keys on provider
 
-remove it from the repo (and ideally history if it was committed)
+ensure repo has no secrets committed
 
-resolve the alert in GitHub → Security → Secret scanning
+resolve alerts in GitHub Security tab
 
-Troubleshooting
-Mermaid still shows a red error box?
-
-99% cases are:
-
-you forgot to close the mermaid fence with ```
-
-you put Quickstart text inside the mermaid fence
-
-Fix: ensure the mermaid diagram is exactly between:
-
-```mermaid
-...diagram only...
-
-### QA shows 401 / Auth failed
-
-- confirm `.env` is loaded in your shell: `set -a; source .env; set +a`
-- confirm you are sending: `Authorization: Bearer $LITELLM_MASTER_KEY`
-- confirm container sees the env:
-  ```bash
-  docker compose exec -T litellm sh -lc 'echo "MASTER_KEY_LEN=${#LITELLM_MASTER_KEY}"'
 Roadmap
 
 Add GitHub Actions CI for make qa (QA_NET=0)
 
 Add provider-specific health checks
 
-Add richer web UI for browsing artifacts/runs
+Improve artifacts/runs browsing UI
 
-Stricter schema validation + better error reporting
+Better schema validation + error reporting
