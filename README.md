@@ -31,23 +31,20 @@ One local OpenAI-compatible endpoint, plus a QA-gated generator workflow.
 
 ```mermaid
 flowchart LR
-  U["Client / Scripts"] -->|OpenAI-compatible| R["LiteLLM Router<br/>127.0.0.1:4000/v1"]
+  U[Client / Scripts] -->|OpenAI-compatible| R[LiteLLM Router\n127.0.0.1:4000/v1]
 
-  R --> DS["DeepSeek"]
-  R --> OA["OpenAI"]
-  R --> OT["Other providers"]
+  R --> DS[DeepSeek]
+  R --> OA[OpenAI]
+  R --> OT[Other providers]
 
-  subgraph W["Workbench"]
-    QA["make qa"]
-    GEN["plan -> scaffold -> verify"]
-    WEB["web_smoke -> next build"]
-    ART["artifacts/runs + logs"]
+  subgraph Workbench
+    QA[make qa]
+    GEN[plan -> scaffold -> verify]
+    WEB[web_smoke -> next build]
+    ART[artifacts/runs + logs]
   end
 
-  R --> QA
-  R --> GEN
-  R --> WEB
-  R --> ART
+
 Quickstart
 Prerequisites
 
