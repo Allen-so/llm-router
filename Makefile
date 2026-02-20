@@ -109,6 +109,7 @@ gen_nextjs: upready
 	@$(MAKE) post_run
 meta_latest:
 	./scripts/run_step_log.sh meta_latest -- python3 scripts/write_run_meta.py --append-events
+	python3 scripts/meta_fix_status.py
 
 runs_summary:
 	python3 scripts/runs_summary_v2.py
