@@ -15,33 +15,21 @@ Expose a local OpenAI-compatible API and ship QA-gated workflows (plan → scaff
 
 ## Architecture
 
-> IMPORTANT: The mermaid block must start at column 1, and the closing ``` must be on its own line.
+```text
+Client / Scripts
+  |
+  |  OpenAI-compatible API
+  v
+LiteLLM Router (http://127.0.0.1:4000/v1)
+  |--> DeepSeek
+  |--> OpenAI
+  `--> Other providers
 
-```mermaid
-flowchart LR
-  Client["Client / Scripts"]
-  Router["LiteLLM Router — 127.0.0.1:4000/v1"]
-
-  DS["DeepSeek"]
-  OA["OpenAI"]
-  OT["Other providers"]
-
-  Client --> Router
-  Router --> DS
-  Router --> OA
-  Router --> OT
-
-  subgraph Workbench
-    QA["make qa"]
-    GEN["plan -> scaffold -> verify"]
-    WEB["web_smoke -> next build"]
-    ART["artifacts/runs + logs"]
-  end
-
-  Router --> QA
-  Router --> GEN
-  Router --> WEB
-  Router --> ART
+Workbench
+  - make qa
+  - plan -> scaffold -> verify
+  - web_smoke -> next build
+  - artifacts/runs + logs
 What you get
 
 OpenAI-compatible endpoint: http://127.0.0.1:4000/v1
