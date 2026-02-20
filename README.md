@@ -2,100 +2,110 @@
 
 Local **AI Router + Generator Workbench** with a **Web Smoke** run-report viewer.
 
-This repo is designed around one principle: **reproducible runs + verifiable outputs**.
+Core idea: **reproducible runs + verifiable outputs + browsable reports**.
 
 ---
 
-## Key Modules
+## Requirements
 
-### 1) Router (LiteLLM, OpenAI-compatible)
-- Base URL: `http://127.0.0.1:4000/v1`
-- Auth header: `Authorization: Bearer $LITELLM_MASTER_KEY`
-- Goal: unify multiple providers/models behind one API.
+- WSL2 Ubuntu
+- Docker Desktop (with `docker compose`)
+- Node.js + npm (for the generated Next.js viewer)
 
-> Router configs live under `infra/` (and Docker-related files if present).
+Optional (auto-open browser from WSL):
+- `wslu` (provides `wslview`)
 
----
-
-### 2) Runs & Artifacts (local only)
-Runs are stored under:
-- `artifacts/runs/<run_id>/`
-
-Typical files inside a run folder:
-- `meta.run.json` — run metadata (kind/status/start/run_dir/plan_hash/gen_dir, etc.)
-- `verify_summary.json` — minimal verify result (e.g., `{ ok: true, ... }`)
-- `verify.log` — verify logs
-- `events.jsonl` — step events
-- `plan.web.json` — web smoke plan input
-
-> `artifacts/` is gitignored on purpose (local evidence store).
-
----
-
-### 3) Web Smoke Viewer (Next.js, generated)
-The viewer app is generated under:
-- `apps/generated/websmoke__<plan_hash>/`
-
-It reads exported JSON data from:
-- `apps/generated/.../public/runs_data/index.json`
-- `apps/generated/.../public/runs_data/<run_id>.json`
-
-Routes:
-- `/runs` — list runs
-- `/runs/<run_id>` — run report detail
-
-> `apps/generated/` is gitignored on purpose (re-generated anytime).
-
----
-
-## Main Commands
-
-### Full QA
 ```bash
-make qa
-One-command Web Smoke (export → build → start → open)
+sudo apt-get update && sudo apt-get install -y wslu
+Router (LiteLLM)
+Base URL: http://127.0.0.1:4000/v1
+
+Auth: Authorization: Bearer $LITELLM_MASTER_KEY
+
+Common commands:
+
+make up
+make ready
+make upready
+make ps
+make logs
+make down
+Sanity checks:
+
+make doctor
+make check
+CLI: ask
+Main entry:
+
+./scripts/ask.sh auto "hello"
+./scripts/ask.sh coding "write a bash script to list files"
+Modes (see scripts/ask.sh --help):
+
+auto | daily | coding | long | hard | best-effort | premium
+
+Runs & Artifacts (local evidence)
+Runs live here (gitignored):
+
+artifacts/runs/<run_id>/
+
+Typical run files:
+
+meta.run.json — run metadata
+
+verify_summary.json — verify result (e.g., ok=true)
+
+verify.log — verify logs
+
+events.jsonl — step events
+
+plan.web.json — web smoke plan
+
+Generated apps (also gitignored):
+
+apps/generated/...
+
+Web Smoke Viewer (Next.js)
+One-command pipeline:
+
 make web_smoke_open
-You should see output including:
+What it does:
 
-a free port like http://localhost:3007
+Run web_smoke (generate + verify)
 
-/runs
+Build run summary (runs_summary_v3)
 
-/runs/<run_id>
+Export runs_data JSON into the generated Next.js app public folder
 
-Verification Checklist (Shipping Gate)
-After make web_smoke_open:
+Inject /runs and /runs/[id] pages + patch UI
 
-Open /runs and confirm the latest run appears.
+Build and start Next.js on a free port
 
-Open /runs/<run_id> and confirm:
+Print the report URL
 
-Summary shows kind/status/start/run_dir
+Viewer routes:
 
-Verify shows ok=true when run passed
+/runs — list runs
 
-Meta is present
+/runs/<run_id> — run report detail
 
-API check (replace PORT/RID accordingly):
+Cleanup / Keep only latest N
+Keep only latest 3 generated apps + runs + key logs:
 
-curl -sS "http://localhost:<PORT>/runs_data/index.json" | head
-curl -sS -o /dev/null -w "%{http_code}\n" "http://localhost:<PORT>/runs_data/<RID>.json"
-curl -sS -o /dev/null -w "%{http_code}\n" "http://localhost:<PORT>/runs/<RID>"
-Repo Notes (Do NOT commit)
-artifacts/ is ignored (local run evidence).
-
-apps/generated/ is ignored (generated viewer apps).
+make prune_keep3
+# or:
+KEEP=3 bash scripts/retain_keep3.sh
+Notes (Do NOT commit)
+artifacts/ and apps/generated/ are intentionally gitignored.
 
 If you accidentally staged them:
 
 git reset -- apps/generated 2>/dev/null || true
 git reset -- artifacts 2>/dev/null || true
-Common Issues
-1) WSL cannot auto-open browser
-Install wslu to enable wslview:
+Troubleshooting
+WSL cannot auto-open the report URL
+Install wslu so wslview exists:
 
 sudo apt-get update && sudo apt-get install -y wslu
-2) Port already in use
-The pipeline automatically picks a free port, but you can check:
-
-ps aux | rg "next start -p"
+NPM audit vulnerabilities
+The viewer uses standard Next.js deps; vulnerabilities may appear in npm audit.
+They do not block the smoke/report workflow. Fix only if you want to harden deps.
