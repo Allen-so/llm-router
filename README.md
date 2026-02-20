@@ -1,116 +1,101 @@
 # ai-platform
 
-Local LiteLLM router + generator workbench (V2).  
-Expose a single OpenAI-compatible API across providers, plus a reproducible **plan → scaffold → verify** pipeline.
+Local **AI Router + Generator Workbench** with a **Web Smoke** run-report viewer.
 
-- Base URL: `http://127.0.0.1:4000/v1`
-- Auth: `Authorization: Bearer $LITELLM_MASTER_KEY`
-- Local-only bind: `127.0.0.1:4000`
-
-## What you get
-
-- **Router**: one API, multiple model aliases
-- **Generators**
-  - **Python CLI generator**: `plan → scaffold → verify_generated`
-  - **Next.js generator**: `plan_web → scaffold_web → verify_generated_web`
-- **QA gate**: `make qa` as the single acceptance gate
-- **Run artifacts**: every run persists inputs/outputs/traces under `artifacts/runs/`
-
-## Model aliases
-
-- `default-chat` — daily (DeepSeek)
-- `long-chat` — long-form (Kimi)
-- `premium-chat` — strongest (Opus via Anthropic gateway)
-- `best-effort-chat` — escalation allowed (fallback chain enabled)
-
-## Endpoints
-
-- Readiness: `http://127.0.0.1:4000/health/readiness`
-- Models: `http://127.0.0.1:4000/v1/models`
-- Chat: `http://127.0.0.1:4000/v1/chat/completions`
-
-<!-- AI-PLATFORM-QUICKSTART-BEGIN -->
-
-## Quickstart (Makefile)
-
-### Requirements
-
-- Docker + Docker Compose plugin
-- Bash-compatible shell
-- Run commands at the repo root (where the `Makefile` lives)
-
-### 30 seconds
-
-1) Configure env:
-
-```bash
-cp .env.example .env
-# edit .env
-Bring up router + basic checks:
-
-make upready
-make check
-Expected (high level):
-
-/v1/models => HTTP=401 means router is alive (auth required; expected)
-
-ROUTER_OK means the ask path works
-
-Common targets
-make help
-make upready
-make check
-make ask  TEXT='Say ROUTER_OK'
-make demo TEXT='Reply with exactly ROUTER_OK and nothing else.'
-make replay_latest
-make qa
-make down
-Generator: Python CLI (LLM-driven)
-Plan:
-
-make upready
-make plan MODEL=default-chat TEXT='Build a minimal python CLI tool named plancheck. It supports --help and prints parsed args.'
-Scaffold:
-
-make scaffold
-Atomic (plan + scaffold):
-
-make gen TEXT='Build a python CLI tool that batch renames files in a folder. Features: dry-run, regex replace, suffix/prefix add. Name it "renamekit".'
-Outputs:
-
-artifacts/runs/run_*/plan.json
-
-apps/generated/<name>/RUN_INSTRUCTIONS.txt
-
-apps/generated/<name>/.generated_from_run
-
-Smoke test (generated project install + help):
-
-./scripts/verify_generated.sh
-Generator: Next.js site (LLM-driven)
-Generate:
-
-make upready
-make gen_nextjs MODEL=default-chat TEXT='Build a Next.js site named v2-demo. Home and /about. Minimal product style.'
-make meta_latest
-make runs_summary
-Inspect latest run:
-
-RUN_DIR="$(cat artifacts/runs/LATEST)"
-ls -la "$RUN_DIR"
-cat "$RUN_DIR/policy.decision.json"
-cat "$RUN_DIR/policy.trace.json"
-tail -n 50 "$RUN_DIR/events.jsonl"
-Verify the generated web build:
-
-./scripts/verify_generated_web.sh
-Policy / Retry
-make policy_smoke
-QA / Diagnostics
-make qa
-ls -1t logs/qa_*.log | head -n 5
-./scripts/doctor.sh
-./scripts/secrets_scan.sh
-<!-- AI-PLATFORM-QUICKSTART-END -->
+This repo is designed around one principle: **reproducible runs + verifiable outputs**.
 
 ---
+
+## Key Modules
+
+### 1) Router (LiteLLM, OpenAI-compatible)
+- Base URL: `http://127.0.0.1:4000/v1`
+- Auth header: `Authorization: Bearer $LITELLM_MASTER_KEY`
+- Goal: unify multiple providers/models behind one API.
+
+> Router configs live under `infra/` (and Docker-related files if present).
+
+---
+
+### 2) Runs & Artifacts (local only)
+Runs are stored under:
+- `artifacts/runs/<run_id>/`
+
+Typical files inside a run folder:
+- `meta.run.json` — run metadata (kind/status/start/run_dir/plan_hash/gen_dir, etc.)
+- `verify_summary.json` — minimal verify result (e.g., `{ ok: true, ... }`)
+- `verify.log` — verify logs
+- `events.jsonl` — step events
+- `plan.web.json` — web smoke plan input
+
+> `artifacts/` is gitignored on purpose (local evidence store).
+
+---
+
+### 3) Web Smoke Viewer (Next.js, generated)
+The viewer app is generated under:
+- `apps/generated/websmoke__<plan_hash>/`
+
+It reads exported JSON data from:
+- `apps/generated/.../public/runs_data/index.json`
+- `apps/generated/.../public/runs_data/<run_id>.json`
+
+Routes:
+- `/runs` — list runs
+- `/runs/<run_id>` — run report detail
+
+> `apps/generated/` is gitignored on purpose (re-generated anytime).
+
+---
+
+## Main Commands
+
+### Full QA
+```bash
+make qa
+One-command Web Smoke (export → build → start → open)
+make web_smoke_open
+You should see output including:
+
+a free port like http://localhost:3007
+
+/runs
+
+/runs/<run_id>
+
+Verification Checklist (Shipping Gate)
+After make web_smoke_open:
+
+Open /runs and confirm the latest run appears.
+
+Open /runs/<run_id> and confirm:
+
+Summary shows kind/status/start/run_dir
+
+Verify shows ok=true when run passed
+
+Meta is present
+
+API check (replace PORT/RID accordingly):
+
+curl -sS "http://localhost:<PORT>/runs_data/index.json" | head
+curl -sS -o /dev/null -w "%{http_code}\n" "http://localhost:<PORT>/runs_data/<RID>.json"
+curl -sS -o /dev/null -w "%{http_code}\n" "http://localhost:<PORT>/runs/<RID>"
+Repo Notes (Do NOT commit)
+artifacts/ is ignored (local run evidence).
+
+apps/generated/ is ignored (generated viewer apps).
+
+If you accidentally staged them:
+
+git reset -- apps/generated 2>/dev/null || true
+git reset -- artifacts 2>/dev/null || true
+Common Issues
+1) WSL cannot auto-open browser
+Install wslu to enable wslview:
+
+sudo apt-get update && sudo apt-get install -y wslu
+2) Port already in use
+The pipeline automatically picks a free port, but you can check:
+
+ps aux | rg "next start -p"
