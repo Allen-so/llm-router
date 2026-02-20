@@ -1,253 +1,243 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import csv
 import json
-import os
-import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_ROOT = ROOT / "artifacts" / "runs"
 
-KEEP = int(os.environ.get("KEEP", "3"))
+META_CANDIDATES = ["meta.run.json", "meta.json"]
+VERIFY_SUMMARY_CANDIDATES = ["verify_summary.json"]
+VERIFY_LOG_CANDIDATES = ["verify.log"]
 
-# Explicit candidates (kept for backward compat)
-VERIFY_CANDIDATES = [
-    "verify_payload.json",
-    "verify.web.json",
-    "verify_web.json",
-    "verify_generated_web.json",
-    "verify.generated_web.json",
-    "verify.json",
-    "verify_payload.json",
-]
+PLAN_CANDIDATES = ["plan.web.json", "plan.json"]
+EVENTS_CANDIDATES = ["events.jsonl", "events.log", "events.txt"]
+STEP_META_CANDIDATES = ["step_meta_latest.log", "step_meta.log"]
 
-LOG_SUFFIX = {".log", ".txt", ".out", ".err"}
-
-OK_PATTERNS = [
-    r"\[ok\]\s+web build passed",
-    r"\bCompiled successfully\b",
-    r"\bReady in\b",
-]
-FAIL_PATTERNS = [
-    r"\bFailed to compile\b",
-    r"\bBuild failed\b",
-    r"\bnpm ERR!\b",
-    r"\bTraceback\b",
-    r"\bERROR\b",
-]
-
-def read_text(p: Path) -> str:
-    try:
-        return p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
-
-def read_json(p: Path) -> Optional[dict[str, Any]]:
+def _read_json(p: Path) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
 
-def truthy_ok(v: Any) -> Optional[bool]:
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in ("true", "ok", "pass", "passed", "success", "1", "yes"):
-            return True
-        if s in ("false", "fail", "failed", "error", "0", "no"):
-            return False
-    return None
-
-def pick_latest_websmoke_dir() -> Path:
-    # Prefer existing bash helper (your repo already has it)
+def _read_text(p: Path, limit_bytes: int = 200_000) -> Optional[str]:
     try:
-        out = subprocess.check_output(
-            ["bash", "-lc", "bash scripts/pick_latest_websmoke_dir.sh"],
-            cwd=str(ROOT),
-            text=True,
-        ).strip()
-        if not out:
-            raise RuntimeError("empty gen dir")
-        p = Path(out)
-        return p if p.is_absolute() else (ROOT / p)
+        s = p.read_text(encoding="utf-8", errors="replace")
+        if len(s.encode("utf-8", errors="replace")) > limit_bytes:
+            # truncate by chars roughly
+            return s[: max(10_000, int(limit_bytes / 4))] + "\n\n[truncated]\n"
+        return s
     except Exception:
-        # Fallback: apps/generated/websmoke__*
-        base = ROOT / "apps" / "generated"
-        cands = sorted(base.glob("websmoke__*"), key=lambda x: x.stat().st_mtime, reverse=True)
-        if not cands:
-            raise SystemExit("[fail] no apps/generated/websmoke__* found")
-        return cands[0]
+        return None
 
-def find_verify_json(run_dir: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    # 1) explicit names
-    for name in VERIFY_CANDIDATES:
-        p = run_dir / name
-        if p.exists() and p.is_file():
-            j = read_json(p)
-            if isinstance(j, dict):
-                return j, p.name
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    # 2) any *verify*.json (newest wins)
-    cands = []
-    for p in run_dir.glob("*.json"):
-        n = p.name.lower()
-        if "verify" in n:
-            cands.append(p)
-    cands = sorted(cands, key=lambda x: x.stat().st_mtime, reverse=True)
-    for p in cands:
-        j = read_json(p)
-        if isinstance(j, dict):
-            return j, p.name
+def _mtime_iso(p: Path) -> str:
+    dt = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
 
-    return None, None
-
-def infer_ok_from_logs(run_dir: Path) -> tuple[Optional[bool], list[str]]:
-    # scan last ~400 lines across recent log-ish files
-    files = []
-    for p in run_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in LOG_SUFFIX:
-            files.append(p)
-    files = sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:12]
-
-    text = ""
-    for p in files:
-        t = read_text(p)
-        lines = t.splitlines()[-400:]
-        if lines:
-            text += "\n".join(lines) + "\n"
-
-    if not text.strip():
-        return None, []
-
-    evidence: list[str] = []
-
-    # Fail has priority if clearly present AND no ok marker
-    ok_hit = any(re.search(pat, text, re.I) for pat in OK_PATTERNS)
-    fail_hit = any(re.search(pat, text, re.I) for pat in FAIL_PATTERNS)
-
-    # collect evidence lines
-    for pat in OK_PATTERNS + FAIL_PATTERNS:
-        m = re.search(pat, text, re.I)
-        if m:
-            # grab the matched line
-            for line in text.splitlines():
-                if re.search(pat, line, re.I):
-                    evidence.append(line.strip())
-                    break
-        if len(evidence) >= 6:
-            break
-
-    if ok_hit and not fail_hit:
-        return True, evidence
-    if fail_hit and not ok_hit:
-        return False, evidence
-    if ok_hit and fail_hit:
-        # ambiguous: still treat as fail unless we see explicit web build passed
-        if re.search(r"\[ok\]\s+web build passed", text, re.I):
-            return True, evidence
-        return False, evidence
-
-    return None, evidence
-
-def infer_status(meta: dict[str, Any], idx: dict[str, Any], verify_payload: Optional[dict[str, Any]], ok_from_logs: Optional[bool]) -> str:
-    for raw in (meta.get("status"), idx.get("status")):
-        if isinstance(raw, str) and raw.strip():
-            s = raw.strip().lower()
-            if s and s != "unknown":
-                return s
-
-    okv = None
-    if isinstance(verify_payload, dict):
-        okv = truthy_ok(verify_payload.get("ok"))
-    if okv is True:
+def _norm_status(x: Any) -> str:
+    s = (str(x) if x is not None else "").strip().lower()
+    if s in ("ok", "pass", "passed", "success", "succeeded", "true"):
         return "ok"
-    if okv is False:
+    if s in ("fail", "failed", "error", "false"):
         return "fail"
+    if s in ("unknown", ""):
+        return "unknown"
+    return s
 
-    if ok_from_logs is True:
-        return "ok"
-    if ok_from_logs is False:
-        return "fail"
-
+def _infer_kind(run_id: str, meta: Dict[str, Any]) -> str:
+    k = (meta.get("kind") or "").strip()
+    if k:
+        return k
+    if run_id.startswith("run_web_smoke_"):
+        return "web_smoke"
+    if run_id.startswith("run_generated_smoke_"):
+        return "generated_smoke"
     return "unknown"
 
-def write_json(p: Path, obj: Any) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+def _pick_first_existing(rd: Path, names: List[str]) -> Optional[Path]:
+    for n in names:
+        p = rd / n
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+def _load_meta(rd: Path) -> Dict[str, Any]:
+    mp = _pick_first_existing(rd, META_CANDIDATES)
+    if mp:
+        j = _read_json(mp)
+        if isinstance(j, dict):
+            return j
+    return {}
+
+def _build_verify(rd: Path, meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
+    vp = _pick_first_existing(rd, VERIFY_SUMMARY_CANDIDATES)
+    if vp:
+        j = _read_json(vp)
+        if isinstance(j, dict):
+            # normalize ok bool if present
+            ok = j.get("ok")
+            if isinstance(ok, str):
+                ok = ok.strip().lower() in ("1", "true", "yes", "ok", "pass", "passed")
+            if ok is None:
+                # fallback: any "status" field
+                ok = _norm_status(j.get("status")) == "ok"
+            out = dict(j)
+            out["ok"] = bool(ok)
+            # add useful meta linkage
+            out.setdefault("plan_hash", meta.get("plan_hash"))
+            if meta.get("gen_dir"):
+                # keep it short & relative if possible
+                try:
+                    out.setdefault("gen_dir", str(Path(meta["gen_dir"]).relative_to(ROOT)))
+                except Exception:
+                    out.setdefault("gen_dir", str(meta["gen_dir"]))
+            out.setdefault("ts", meta.get("ts_utc") or meta.get("start") or _mtime_iso(rd))
+            return out, vp
+    return None, None
+
+def _build_verify_log(rd: Path) -> Tuple[Optional[str], Optional[Path]]:
+    lp = _pick_first_existing(rd, VERIFY_LOG_CANDIDATES)
+    if lp:
+        return _read_text(lp), lp
+    return None, None
+
+def _build_plan(rd: Path) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
+    pp = _pick_first_existing(rd, PLAN_CANDIDATES)
+    if pp:
+        j = _read_json(pp)
+        if isinstance(j, dict):
+            return j, pp
+    return None, None
+
+def _start_ts(meta: Dict[str, Any], rd: Path) -> str:
+    # prefer meta.ts_utc
+    for k in ("ts_utc", "start", "started_at"):
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return _mtime_iso(rd)
+
+def _status(meta: Dict[str, Any], verify: Optional[Dict[str, Any]]) -> str:
+    s = _norm_status(meta.get("status"))
+    if s in ("ok", "fail"):
+        return s
+    if verify and isinstance(verify.get("ok"), bool):
+        return "ok" if verify["ok"] else "fail"
+    return "unknown"
+
+def _read_runs_summary_csv() -> Optional[List[Dict[str, str]]]:
+    p = RUNS_ROOT / "runs_summary_v3.csv"
+    if not p.exists():
+        return None
+    try:
+        rows = list(csv.DictReader(p.open("r", encoding="utf-8")))
+        return rows
+    except Exception:
+        return None
+
+def _pick_gen_dir(arg_gen: Optional[str]) -> Path:
+    if arg_gen:
+        return Path(arg_gen).expanduser().resolve()
+    # default: call your helper script
+    out = subprocess.check_output(["bash", "-lc", "bash scripts/pick_latest_websmoke_dir.sh"], cwd=str(ROOT), text=True).strip()
+    return Path(out).expanduser().resolve()
 
 def main() -> int:
-    gen_dir = pick_latest_websmoke_dir()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gen-dir", default=None)
+    ap.add_argument("--max-items", type=int, default=50)
+    args = ap.parse_args()
+
+    gen_dir = _pick_gen_dir(args.gen_dir)
     out_dir = gen_dir / "public" / "runs_data"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = [p for p in RUNS_ROOT.glob("run_*") if p.is_dir()]
-    run_dirs = sorted(run_dirs, key=lambda x: x.stat().st_mtime, reverse=True)
+    rows = _read_runs_summary_csv()
+    run_dirs: List[Path] = []
 
-    # keep last KEEP runs
-    run_dirs = run_dirs[:KEEP]
+    if rows:
+        # sort by start desc if possible
+        def _key(r: Dict[str, str]) -> str:
+            return (r.get("start") or r.get("ts_utc") or "")
+        rows_sorted = sorted(rows, key=_key, reverse=True)
+        for r in rows_sorted:
+            rd = r.get("run_dir") or ""
+            if not rd:
+                continue
+            p = Path(rd)
+            if p.exists() and p.is_dir():
+                run_dirs.append(p)
+            if len(run_dirs) >= args.max_items:
+                break
+    else:
+        # fallback: list run_* directories by mtime
+        candidates = [p for p in RUNS_ROOT.glob("run_*") if p.is_dir()]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        run_dirs = candidates[: args.max_items]
 
-    index_items: list[dict[str, Any]] = []
+    index_items: List[Dict[str, Any]] = []
+    exported = 0
 
     for rd in run_dirs:
         run_id = rd.name
+        meta = _load_meta(rd)
+        kind = _infer_kind(run_id, meta)
+        verify, verify_file = _build_verify(rd, meta)
+        verify_log, verify_log_file = _build_verify_log(rd)
+        plan, plan_file = _build_plan(rd)
 
-        meta = read_json(rd / "meta.run.json") or {}
-        idx = {
-            "run_id": run_id,
-            "run_dir": str(rd),
-            "kind": meta.get("kind") or "unknown",
-            "status": meta.get("status") or "unknown",
-            "start": meta.get("ts") or meta.get("ts_utc") or meta.get("start") or "",
-        }
-
-        verify_payload, verify_src = find_verify_json(rd)
-        ok_from_logs, evidence = infer_ok_from_logs(rd)
-
-        status = infer_status(meta, idx, verify_payload, ok_from_logs)
-        meta["status"] = status
-        idx["status"] = status
-
-        # Build a verify_payload if missing but logs can infer
-        if verify_payload is None and ok_from_logs is not None:
-            verify_payload = {
-                "ok": bool(ok_from_logs),
-                "ts": meta.get("ts") or meta.get("ts_utc") or "",
-                "source": f"log_infer:{rd.name}",
-                "evidence": evidence[:6],
-            }
-        elif isinstance(verify_payload, dict):
-            # normalize + keep provenance
-            verify_payload.setdefault("source", verify_src or "verify_json")
+        start = _start_ts(meta, rd)
+        status = _status(meta, verify)
 
         detail = {
             "run_id": run_id,
-            "index": idx,
+            "index": {
+                "run_id": run_id,
+                "run_dir": str(rd),
+                "kind": kind,
+                "status": status,
+                "start": start,
+            },
             "meta": meta,
-            "verify_payload": verify_payload,
-            # backward compat for older pages/tools
-            "verify": verify_payload,
+            "verify": verify,
+            "verify_log": verify_log,
+            "plan": plan,
+            "source": {
+                "meta_file": str((rd / (verify_file.name if verify_file else "")).resolve()) if False else str((_pick_first_existing(rd, META_CANDIDATES) or rd).resolve()),
+                "verify_file": str(verify_file) if verify_file else None,
+                "verify_log_file": str(verify_log_file) if verify_log_file else None,
+                "plan_file": str(plan_file) if plan_file else None,
+            },
         }
 
-        write_json(out_dir / f"{run_id}.json", detail)
+        (out_dir / f"{run_id}.json").write_text(json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8")
+        exported += 1
 
         index_items.append({
             "run_id": run_id,
             "run_dir": str(rd),
-            "kind": idx.get("kind"),
+            "kind": kind,
             "status": status,
-            "start": idx.get("start") or "",
+            "start": start,
         })
 
-    write_json(out_dir / "index.json", index_items)
+    # keep deterministic ordering
+    def _idx_key(it: Dict[str, Any]) -> str:
+        return str(it.get("start") or "")
+    index_items.sort(key=_idx_key, reverse=True)
 
+    (out_dir / "index.json").write_text(json.dumps(index_items, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] wrote {out_dir/'index.json'} items={len(index_items)}")
-    print(f"[ok] exported details -> {out_dir} exported={len(index_items)}")
+    print(f"[ok] exported details -> {out_dir} exported={exported}")
     return 0
 
 if __name__ == "__main__":
