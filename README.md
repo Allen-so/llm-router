@@ -44,11 +44,7 @@ flowchart LR
     ART["artifacts/runs + logs"]
   end
 
-  R --> QA
-  R --> GEN
-  R --> WEB
-  R --> ART
-  R --> Workbench
+
 Quickstart
 Prerequisites
 
