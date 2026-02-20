@@ -44,7 +44,10 @@ flowchart LR
     ART["artifacts/runs + logs"]
   end
 
-
+  R --> QA
+  R --> GEN
+  R --> WEB
+  R --> ART
 Quickstart
 Prerequisites
 
@@ -56,7 +59,10 @@ Python 3
 
 1) Create .env (DO NOT COMMIT)
 cat > .env <<'EOF'
+# Router auth (your local gateway key)
 LITELLM_MASTER_KEY=CHANGE_ME_LONG_RANDOM
+
+# Provider keys
 DEEPSEEK_API_KEY=CHANGE_ME
 # OPENAI_API_KEY=CHANGE_ME
 EOF
@@ -68,6 +74,8 @@ Useful commands
 Start router
 docker compose up -d
 Check router is up
+set -a; source .env; set +a
+
 curl -s -o /dev/null -w "models=%{http_code}\n" \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   http://127.0.0.1:4000/v1/models
@@ -100,10 +108,10 @@ rotate/revoke them, then resolve the alert in the Security tab.
 
 Roadmap
 
- Add GitHub Actions CI for make qa (QA_NET=0)
+Add GitHub Actions CI for make qa (QA_NET=0)
 
- Add provider-specific health checks
+Add provider-specific health checks
 
- Add richer web UI for browsing artifacts/runs
+Add richer web UI for browsing artifacts/runs
 
- Add stricter schema validation + better error reporting
+Add stricter schema validation + better error reporting
