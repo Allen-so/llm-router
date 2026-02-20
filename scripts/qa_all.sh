@@ -6,6 +6,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/load_node.sh" || true
 cd "$ROOT" || exit 1
 
+# auto-load .env for QA (so make qa works without manual `source .env`)
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env"
+  set +a
+fi
+
+QA_NET="${QA_NET:-0}"
+
+
 mkdir -p logs
 
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -145,25 +156,25 @@ else
   skip_step models_endpoint "docker not ready"
 fi
 
-# 7 strict ask gate
-if [ $DOCKER_OK -eq 1 ]; then
+# 7 strict ask gate (needs real keys)
+if [ $DOCKER_OK -eq 1 ] && [ "${QA_NET}" = "1" ]; then
   run_step strict_check bash -lc 'make check' || true
 else
-  skip_step strict_check "docker not ready"
+  skip_step strict_check "QA_NET=0 or docker not ready (skip live key-required checks)"
 fi
 
-# 8 demo + replay
-if [ $DOCKER_OK -eq 1 ]; then
+# 8 demo + replay (needs real keys)
+if [ $DOCKER_OK -eq 1 ] && [ "${QA_NET}" = "1" ]; then
   run_step demo_replay bash -lc '
     make demo MODE=auto TEXT="Reply with exactly ROUTER_OK and nothing else."
     make replay_latest
   ' || true
 else
-  skip_step demo_replay "docker not ready"
+  skip_step demo_replay "QA_NET=0 or docker not ready (skip live key-required checks)"
 fi
 
-# 9 plan + scaffold
-if [ $DOCKER_OK -eq 1 ]; then
+# 9 plan + scaffold (needs real keys)
+if [ $DOCKER_OK -eq 1 ] && [ "${QA_NET}" = "1" ]; then
   if run_step plan_scaffold bash -lc '
     make plan MODEL=default-chat TEXT="Build a minimal python CLI tool named plancheck. It supports --help and prints parsed args."
     make scaffold
@@ -171,8 +182,8 @@ if [ $DOCKER_OK -eq 1 ]; then
     run_step generated_smoke bash -lc 'make verify_generated'
   fi
 else
-  skip_step plan_scaffold "docker not ready"
-  skip_step generated_smoke "docker not ready"
+  skip_step plan_scaffold "QA_NET=0 or docker not ready (skip live key-required checks)"
+  skip_step generated_smoke "QA_NET=0 or docker not ready (skip live key-required checks)"
 fi
 
 # 9c web scaffold smoke (deterministic)
