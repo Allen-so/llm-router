@@ -43,8 +43,6 @@ flowchart LR
     WEB[web_smoke -> next build]
     ART[artifacts/runs + logs]
   end
-
-
 Quickstart
 Prerequisites
 
