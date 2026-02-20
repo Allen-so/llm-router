@@ -15,8 +15,6 @@ It exposes a **local OpenAI-compatible API** and includes a **QA-gated workflow*
 
 ## Architecture
 
-> ✅ 注意：下面 ` ```mermaid ` 到 ` ``` ` 之间 **只能放 mermaid 图代码**，不要混进任何文字，否则 GitHub 会报红。
-
 ```mermaid
 flowchart LR
   U["Client / Scripts"] -->|OpenAI-compatible| R["LiteLLM Router<br/>127.0.0.1:4000/v1"]
